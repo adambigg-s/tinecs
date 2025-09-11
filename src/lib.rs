@@ -5,6 +5,7 @@ use std::ops::Deref;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::vec;
 
 static MASTER: LazyLock<Mutex<Master>> = LazyLock::new(|| Mutex::new(Master::default()));
 
@@ -30,8 +31,8 @@ impl Entity {
         Self { ident: Into::into(id) }
     }
 
-    pub fn id(&self) -> u32 {
-        **self
+    pub fn id(self) -> u32 {
+        *self
     }
 }
 
@@ -66,16 +67,40 @@ trait AsAny {
 
 impl AsAny for dyn Component {
     fn as_any(&self) -> &dyn Any {
-        self
+        self as &dyn Any
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
+        self as &mut dyn Any
     }
 }
 
-pub trait System {
-    fn run(&mut self);
+pub struct Query<'d, C> {
+    inner: Vec<&'d C>,
+}
+
+impl<'d, C> IntoIterator for Query<'d, C> {
+    type Item = &'d C;
+
+    type IntoIter = vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
+pub struct QueryMut<'d, C> {
+    inner: Vec<&'d mut C>,
+}
+
+impl<'d, C> IntoIterator for QueryMut<'d, C> {
+    type Item = &'d mut C;
+
+    type IntoIter = vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
 }
 
 #[derive(Default)]
@@ -107,22 +132,6 @@ impl Master {
         self.components.entry(type_ident).or_default().insert(entity, boxed);
     }
 
-    #[cfg(never)]
-    pub fn remove_component<C>(&mut self, entity: Entity) -> Option<C>
-    where
-        C: Component,
-    {
-        let type_ident = TypeId::of::<C>();
-        let boxed = self.components.get_mut(&type_ident)?.remove(&entity)?;
-        /* WARNING: */
-        /* wait, this might not even be possible without just cloning it... */
-
-        if let Some(out) = boxed.as_any().downcast_ref().map(|value| *value) {
-            return Some(out);
-        }
-        None
-    }
-
     pub fn remove_component_dont_return<C>(&mut self, entity: Entity)
     where
         C: Component,
@@ -142,23 +151,10 @@ impl Master {
         // basically, grab the original type (outer hashmap) based on the
         // generic C, then take the actual data stored on Id. this has to be
         // recast to the C's type, so cast as Any and re(down)cast to C
-        let Some(type_layer) = self.components.get(&type_ident)
-        else {
-            panic!("no type added yet");
-        };
-        let Some(entity_layer) = type_layer.get(&entity)
-        else {
-            panic!("no components added yet");
-        };
-        /* TODO: */
-        /* none of these should actually panic, just for prototype */
-        // better implementation below
-        let Some(out) = entity_layer.as_any().downcast_ref::<C>()
-        else {
-            panic!("failed to downcast component");
-        };
-
-        Some(out)
+        self.components
+            .get(&type_ident)
+            .and_then(|outer| outer.get(&entity))
+            .and_then(|inner| inner.as_any().downcast_ref())
     }
 
     pub fn get_component_mut<C>(&mut self, entity: Entity) -> Option<&mut C>
@@ -167,10 +163,59 @@ impl Master {
     {
         let type_ident = TypeId::of::<C>();
 
+        // exactly the same as above but does everything mutably
         self.components
             .get_mut(&type_ident)
             .and_then(|outer| outer.get_mut(&entity))
             .and_then(|inner| inner.as_any_mut().downcast_mut::<C>())
+    }
+
+    pub fn query_entities<C>(&self) -> impl Iterator<Item = Entity>
+    where
+        C: Component,
+    {
+        let type_ident = TypeId::of::<C>();
+
+        self.components.get(&type_ident).into_iter().flat_map(|outer| outer.keys().copied())
+    }
+
+    pub fn query_components<'d, C>(&'d self) -> Query<'d, C>
+    where
+        C: Component,
+    {
+        let type_ident = TypeId::of::<C>();
+
+        Query {
+            inner: self
+                .components
+                .get(&type_ident)
+                .into_iter()
+                .flat_map(|outer| outer.values())
+                .filter_map(|inner| inner.as_any().downcast_ref())
+                .collect(),
+        }
+    }
+
+    pub fn query_components_mut<'d, C>(&'d mut self) -> QueryMut<'d, C>
+    where
+        C: Component,
+    {
+        let type_ident = TypeId::of::<C>();
+
+        QueryMut {
+            inner: self
+                .components
+                .get_mut(&type_ident)
+                .into_iter()
+                .flat_map(|outer| outer.values_mut())
+                .filter_map(|inner| inner.as_any_mut().downcast_mut())
+                .collect(),
+        }
+    }
+
+    #[allow(dead_code)]
+    unsafe fn reset(&mut self) {
+        *self = Self::default()
     }
 }
 
@@ -180,12 +225,11 @@ mod glmutable_test {
 
     use super::*;
 
+    impl Component for FooBarStruct {}
     #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct FooBarStruct {
         field: i32,
     }
-
-    impl Component for FooBarStruct {}
 
     #[test]
     #[allow(clippy::unit_cmp)]
@@ -198,6 +242,9 @@ mod glmutable_test {
     #[test]
     fn glmut_insert() {
         let mut master = master();
+        unsafe {
+            master.reset();
+        }
         let ent = master.create_entity();
         let cmp = FooBarStruct::default();
         master.add_component(ent, cmp);
@@ -205,8 +252,24 @@ mod glmutable_test {
     }
 
     #[test]
+    fn glmut_destroy() {
+        let mut master = master();
+        unsafe {
+            master.reset();
+        }
+        let ent = master.create_entity();
+        let cmp = FooBarStruct::default();
+        master.add_component(ent, cmp);
+        master.destroy_entity(ent);
+        assert!(master.get_component::<FooBarStruct>(ent).is_none());
+    }
+
+    #[test]
     fn glmut_get() {
         let mut master = master();
+        unsafe {
+            master.reset();
+        }
         let ent = master.create_entity();
         let cmp = FooBarStruct::default();
         master.add_component(ent, cmp);
@@ -216,6 +279,9 @@ mod glmutable_test {
     #[test]
     fn glmut_get_mut() {
         let mut master = master();
+        unsafe {
+            master.reset();
+        }
         let ent = master.create_entity();
         let cmp = FooBarStruct::default();
         master.add_component(ent, cmp);
@@ -225,5 +291,31 @@ mod glmutable_test {
 
         query.unwrap().field = 33;
         assert!(master.get_component::<FooBarStruct>(ent).unwrap().field == 33);
+    }
+
+    #[test]
+    fn glmut_query() {
+        let mut master = master();
+        unsafe {
+            master.reset();
+        }
+        let ent1 = master.create_entity();
+        let cmp = FooBarStruct::default();
+        master.add_component(ent1, cmp);
+
+        {
+            let query = master.query_entities::<FooBarStruct>();
+            let counter = query.count();
+            assert!(counter == 1, "counted: {}", counter);
+        }
+
+        let ent2 = master.create_entity();
+        master.add_component(ent2, cmp);
+
+        {
+            let query = master.query_entities::<FooBarStruct>();
+            let counter = query.count();
+            assert!(counter == 2, "counted: {}", counter);
+        }
     }
 }
