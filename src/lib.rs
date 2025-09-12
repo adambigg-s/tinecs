@@ -89,7 +89,7 @@ impl<'d, C> SystemArg<'d> for Query<'d, C>
 where
     C: Component,
 {
-    fn fetch(master: &'d mut Master) -> Self {
+    fn fetch(master: &'d Master) -> Self {
         master.query_components::<C>()
     }
 }
@@ -108,20 +108,21 @@ impl<'d, C> IntoIterator for QueryMut<'d, C> {
     }
 }
 
-impl<'d, C> SystemArg<'d> for QueryMut<'d, C>
-where
-    C: Component,
-{
-    fn fetch(master: &'d mut Master) -> Self {
-        master.query_components_mut::<C>()
-    }
-}
+/* can only fetch stuff immut right now, need to figure that out later */
+// impl<'d, C> SystemArg<'d> for QueryMut<'d, C>
+// where
+//     C: Component,
+// {
+//     fn fetch(master: &'d Master) -> Self {
+//         master.query_components_mut::<C>()
+//     }
+// }
 
 pub trait SystemArg<'d>
 where
     Self: Send + Sync + Sized,
 {
-    fn fetch(master: &'d mut Master) -> Self;
+    fn fetch(master: &'d Master) -> Self;
 }
 
 pub trait System
@@ -131,12 +132,34 @@ where
     fn run(&mut self, master: &mut Master);
 }
 
-impl<T: FnMut()> System for T
+pub struct ArgSet<T> {
+    args: T,
+}
+
+impl<'d> SystemArg<'d> for ArgSet<()> {
+    fn fetch(_: &'d Master) -> Self {
+        Self { args: () }
+    }
+}
+
+impl<'d, A> SystemArg<'d> for ArgSet<A>
 where
-    T: Send + Sync,
+    A: SystemArg<'d>,
 {
-    fn run(&mut self, _: &mut Master) {
-        (self)()
+    fn fetch(master: &'d Master) -> Self {
+        Self { args: A::fetch(master) }
+    }
+}
+
+impl<'d, A, B> SystemArg<'d> for ArgSet<(A, B)>
+where
+    A: SystemArg<'d>,
+    B: SystemArg<'d>,
+{
+    fn fetch(master: &'d Master) -> Self {
+        let a = A::fetch(master);
+        let b = B::fetch(master);
+        Self { args: (a, b) }
     }
 }
 
@@ -144,7 +167,6 @@ where
 pub struct Master {
     curr_ident: u32,
     components: HashMap<TypeId, HashMap<Entity, Box<dyn Component>>>,
-    system_fns: Vec<Box<&'static mut dyn System>>,
 }
 
 impl Master {
@@ -249,18 +271,6 @@ impl Master {
                 .filter_map(|inner| inner.as_any_mut().downcast_mut())
                 .collect(),
         }
-    }
-
-    pub fn add_system(&mut self, system: &'static mut dyn System) {
-        self.system_fns.push(Box::new(system));
-    }
-
-    pub fn run_systems(&mut self) {
-        let mut systems = std::mem::take(&mut self.system_fns);
-        for system in &mut systems {
-            system.run(self);
-        }
-        self.system_fns = systems;
     }
 
     #[allow(dead_code)]
