@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -85,15 +86,6 @@ impl<'d, C> IntoIterator for Query<'d, C> {
     }
 }
 
-impl<'d, C> SystemArg<'d> for Query<'d, C>
-where
-    C: Component,
-{
-    fn fetch(master: &'d Master) -> Self {
-        master.query_components::<C>()
-    }
-}
-
 pub struct QueryMut<'d, C> {
     inner: Vec<&'d mut C>,
 }
@@ -108,58 +100,116 @@ impl<'d, C> IntoIterator for QueryMut<'d, C> {
     }
 }
 
-/* can only fetch stuff immut right now, need to figure that out later */
-// impl<'d, C> SystemArg<'d> for QueryMut<'d, C>
-// where
-//     C: Component,
-// {
-//     fn fetch(master: &'d Master) -> Self {
-//         master.query_components_mut::<C>()
-//     }
-// }
-
-pub trait SystemArg<'d>
+pub trait System
 where
-    Self: Send + Sync + Sized,
+    Self: Send + Sync + 'static,
 {
+    fn run(&mut self, master: &Master);
+}
+
+pub trait SystemParam<'d> {
     fn fetch(master: &'d Master) -> Self;
 }
 
-pub trait System
+pub trait IntoSystem<Params> {
+    type Output: System;
+
+    fn into_system(self) -> Self::Output;
+}
+
+pub struct FunctionSystem<F, Params> {
+    system: F,
+    params: PhantomData<Params>,
+}
+
+impl<F, Params> IntoSystem<Params> for F
 where
-    Self: Send + Sync,
+    F: SystemParamFunction<Params> + Send + Sync + 'static,
+    Params: for<'a> SystemParam<'a> + Send + Sync + 'static,
 {
-    fn run(&mut self, master: &mut Master);
-}
+    type Output = FunctionSystem<F, Params>;
 
-pub struct ArgSet<T> {
-    args: T,
-}
-
-impl<'d> SystemArg<'d> for ArgSet<()> {
-    fn fetch(_: &'d Master) -> Self {
-        Self { args: () }
+    fn into_system(self) -> Self::Output {
+        FunctionSystem { system: self, params: PhantomData }
     }
 }
 
-impl<'d, A> SystemArg<'d> for ArgSet<A>
+trait SystemParamFunction<Params> {
+    fn run(&mut self, params: Params);
+}
+
+impl<F, Params> System for FunctionSystem<F, Params>
 where
-    A: SystemArg<'d>,
+    F: SystemParamFunction<Params> + Send + Sync + 'static,
+    Params: for<'a> SystemParam<'a> + Send + Sync + 'static,
+{
+    fn run(&mut self, master: &Master) {
+        let params = Params::fetch(master);
+        SystemParamFunction::run(&mut self.system, params)
+    }
+}
+
+impl<'d, C> SystemParam<'d> for Query<'d, C>
+where
+    C: Component,
 {
     fn fetch(master: &'d Master) -> Self {
-        Self { args: A::fetch(master) }
+        master.query_components()
     }
 }
 
-impl<'d, A, B> SystemArg<'d> for ArgSet<(A, B)>
+impl<'d> SystemParam<'d> for () {
+    fn fetch(_: &'d Master) -> Self {}
+}
+
+impl<'d, A> SystemParam<'d> for (A,)
 where
-    A: SystemArg<'d>,
-    B: SystemArg<'d>,
+    A: SystemParam<'d>,
+{
+    fn fetch(master: &'d Master) -> Self {
+        (A::fetch(master),)
+    }
+}
+
+impl<'d, A, B> SystemParam<'d> for (A, B)
+where
+    A: SystemParam<'d>,
+    B: SystemParam<'d>,
 {
     fn fetch(master: &'d Master) -> Self {
         let a = A::fetch(master);
         let b = B::fetch(master);
-        Self { args: (a, b) }
+        (a, b)
+    }
+}
+
+impl<F> SystemParamFunction<()> for F
+where
+    F: Fn() + Send + Sync,
+{
+    fn run(&mut self, _: ()) {
+        (self)()
+    }
+}
+
+impl<F, A> SystemParamFunction<(A,)> for F
+where
+    F: Fn(A) + Send + Sync,
+    A: for<'a> SystemParam<'a>,
+{
+    fn run(&mut self, params: (A,)) {
+        (self)(params.0)
+    }
+}
+
+impl<F, A, B> SystemParamFunction<(A, B)> for F
+where
+    F: Fn(A, B) + Send + Sync,
+    A: for<'a> SystemParam<'a>,
+    B: for<'a> SystemParam<'a>,
+{
+    fn run(&mut self, params: (A, B)) {
+        (self)(params.0, params.1)
     }
 }
 
@@ -167,9 +217,26 @@ where
 pub struct Master {
     curr_ident: u32,
     components: HashMap<TypeId, HashMap<Entity, Box<dyn Component>>>,
+    systems: Vec<Box<dyn System>>,
 }
 
 impl Master {
+    pub fn add_system<F, Params>(&mut self, system: F)
+    where
+        F: IntoSystem<Params>,
+        Params: for<'a> SystemParam<'a> + 'static,
+    {
+        self.systems.push(Box::new(system.into_system()));
+    }
+
+    pub fn run_systems(&mut self) {
+        let mut systems = std::mem::take(&mut self.systems);
+        for system in &mut systems {
+            system.run(self);
+        }
+        self.systems = systems;
+    }
+
     pub fn create_entity(&mut self) -> Entity {
         let out = Entity::build(self.curr_ident);
         self.curr_ident += 1;
@@ -192,7 +259,7 @@ impl Master {
         self.components.entry(type_ident).or_default().insert(entity, boxed);
     }
 
-    pub fn remove_component_dont_return<C>(&mut self, entity: Entity)
+    pub fn remove_component<C>(&mut self, entity: Entity)
     where
         C: Component,
     {
