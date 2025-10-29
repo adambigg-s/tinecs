@@ -1,448 +1,330 @@
-use std::any::Any;
-use std::any::TypeId;
-use std::collections::HashMap;
-use std::marker::PhantomData;
-use std::ops::Deref;
-use std::sync::LazyLock;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
-use std::vec;
+use std::{
+    any::{Any, TypeId},
+    cell::{Ref, RefCell, RefMut},
+    collections::HashMap,
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+};
 
-static MASTER: LazyLock<Mutex<Master>> = LazyLock::new(|| Mutex::new(Master::default()));
-
-#[track_caller]
-#[inline(always)]
-pub fn master() -> MutexGuard<'static, Master> {
-    /* TODO: */
-    /* def need to handle this error, just for prototyping */
-    MASTER.lock().expect("failed to lock master")
-}
-
-#[repr(transparent)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Entity {
-    ident: u32,
+    id: u32,
 }
 
-impl Entity {
-    pub fn build<Id>(id: Id) -> Self
+pub trait Component: Any {}
+
+pub trait System {
+    fn run(&mut self, map: &mut ComponentMap);
+}
+
+pub trait SystemBuilder<In> {
+    type System: System;
+
+    fn build_system(self) -> Self::System;
+}
+
+pub struct FnSystem<In, Func> {
+    func: Func,
+    marker: PhantomData<fn() -> In>,
+}
+
+trait SystemArg {
+    type Item<'o>;
+
+    fn fetch<'i>(components: &'i ComponentMap) -> Self::Item<'i>;
+}
+
+#[derive(Default)]
+pub struct ComponentMap {
+    inner: HashMap<TypeId, HashMap<Entity, RefCell<Box<dyn Any + 'static>>>>,
+}
+
+impl ComponentMap {
+    fn query_components<'d, C>(&'d self) -> Query<'d, C>
     where
-        Id: Into<u32>,
+        C: 'static,
     {
-        Self { ident: Into::into(id) }
+        Query {
+            inner: self
+                .get(&TypeId::of::<C>())
+                .into_iter()
+                .flat_map(|outer| outer.values())
+                .map(|inner| inner.borrow())
+                .collect(),
+            marker: PhantomData,
+        }
     }
 
-    pub fn id(self) -> u32 {
-        *self
+    fn query_components_mut<'d, C>(&'d self) -> QueryMut<'d, C>
+    where
+        C: 'static,
+    {
+        todo!()
     }
 }
 
-impl Deref for Entity {
-    type Target = u32;
+impl Deref for ComponentMap {
+    type Target = HashMap<TypeId, HashMap<Entity, RefCell<Box<dyn Any>>>>;
 
     fn deref(&self) -> &Self::Target {
-        &self.ident
+        &self.inner
     }
 }
 
-impl<T> From<T> for Entity
-where
-    T: Into<u32>,
-{
-    fn from(value: T) -> Self {
-        Self::build(value.into())
-    }
-}
-
-pub trait Component: Any + Send + Sync {}
-
-trait AsAny {
-    fn as_any(&self) -> &dyn Any;
-
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-
-impl AsAny for dyn Component {
-    fn as_any(&self) -> &dyn Any {
-        self as &dyn Any
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self as &mut dyn Any
-    }
-}
-
-pub struct Query<'d, C> {
-    inner: Vec<&'d C>,
-}
-
-impl<'d, C> IntoIterator for Query<'d, C> {
-    type Item = &'d C;
-
-    type IntoIter = vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
-    }
-}
-
-pub struct QueryMut<'d, C> {
-    inner: Vec<&'d mut C>,
-}
-
-impl<'d, C> IntoIterator for QueryMut<'d, C> {
-    type Item = &'d mut C;
-
-    type IntoIter = vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
-    }
-}
-
-pub trait System
-where
-    Self: Send + Sync + 'static,
-{
-    fn run(&mut self, master: &Master);
-}
-
-pub trait SystemParam<'d> {
-    fn fetch(master: &'d Master) -> Self;
-}
-
-pub trait IntoSystem<Params> {
-    type Output: System;
-
-    fn into_system(self) -> Self::Output;
-}
-
-pub struct FunctionSystem<F, Params> {
-    system: F,
-    params: PhantomData<Params>,
-}
-
-impl<F, Params> IntoSystem<Params> for F
-where
-    F: SystemParamFunction<Params> + Send + Sync + 'static,
-    Params: for<'a> SystemParam<'a> + Send + Sync + 'static,
-{
-    type Output = FunctionSystem<F, Params>;
-
-    fn into_system(self) -> Self::Output {
-        FunctionSystem { system: self, params: PhantomData }
-    }
-}
-
-trait SystemParamFunction<Params> {
-    fn run(&mut self, params: Params);
-}
-
-impl<F, Params> System for FunctionSystem<F, Params>
-where
-    F: SystemParamFunction<Params> + Send + Sync + 'static,
-    Params: for<'a> SystemParam<'a> + Send + Sync + 'static,
-{
-    fn run(&mut self, master: &Master) {
-        let params = Params::fetch(master);
-        SystemParamFunction::run(&mut self.system, params)
-    }
-}
-
-impl<'d, C> SystemParam<'d> for Query<'d, C>
-where
-    C: Component,
-{
-    fn fetch(master: &'d Master) -> Self {
-        master.query_components()
-    }
-}
-
-impl<'d> SystemParam<'d> for () {
-    fn fetch(_: &'d Master) -> Self {}
-}
-
-impl<'d, A> SystemParam<'d> for (A,)
-where
-    A: SystemParam<'d>,
-{
-    fn fetch(master: &'d Master) -> Self {
-        (A::fetch(master),)
-    }
-}
-
-impl<'d, A, B> SystemParam<'d> for (A, B)
-where
-    A: SystemParam<'d>,
-    B: SystemParam<'d>,
-{
-    fn fetch(master: &'d Master) -> Self {
-        let a = A::fetch(master);
-        let b = B::fetch(master);
-        (a, b)
-    }
-}
-
-impl<F> SystemParamFunction<()> for F
-where
-    F: Fn() + Send + Sync,
-{
-    fn run(&mut self, _: ()) {
-        (self)()
-    }
-}
-
-impl<F, A> SystemParamFunction<(A,)> for F
-where
-    F: Fn(A) + Send + Sync,
-    A: for<'a> SystemParam<'a>,
-{
-    fn run(&mut self, params: (A,)) {
-        (self)(params.0)
-    }
-}
-
-impl<F, A, B> SystemParamFunction<(A, B)> for F
-where
-    F: Fn(A, B) + Send + Sync,
-    A: for<'a> SystemParam<'a>,
-    B: for<'a> SystemParam<'a>,
-{
-    fn run(&mut self, params: (A, B)) {
-        (self)(params.0, params.1)
+impl DerefMut for ComponentMap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
 #[derive(Default)]
 pub struct Master {
-    curr_ident: u32,
-    components: HashMap<TypeId, HashMap<Entity, Box<dyn Component>>>,
+    curr_entity: Entity,
+    components: ComponentMap,
     systems: Vec<Box<dyn System>>,
 }
 
 impl Master {
-    pub fn add_system<F, Params>(&mut self, system: F)
-    where
-        F: IntoSystem<Params>,
-        Params: for<'a> SystemParam<'a> + 'static,
-    {
-        self.systems.push(Box::new(system.into_system()));
-    }
-
-    pub fn run_systems(&mut self) {
-        let mut systems = std::mem::take(&mut self.systems);
-        for system in &mut systems {
-            system.run(self);
-        }
-        self.systems = systems;
-    }
-
     pub fn create_entity(&mut self) -> Entity {
-        let out = Entity::build(self.curr_ident);
-        self.curr_ident += 1;
+        let out = self.curr_entity;
+        self.curr_entity.id += 1;
         out
     }
 
-    pub fn destroy_entity(&mut self, entity: Entity) {
-        self.components.values_mut().for_each(|component| {
-            component.remove(&entity);
-        });
+    pub fn run(&mut self) {
+        for system in self.systems.iter_mut() {
+            system.run(&mut self.components);
+        }
+    }
+
+    pub fn add_system<A, I, S>(&mut self, system: A)
+    where
+        A: SystemBuilder<I, System = S>,
+        S: System + 'static,
+    {
+        self.systems.push(Box::new(system.build_system()));
     }
 
     pub fn add_component<C>(&mut self, entity: Entity, component: C)
     where
-        C: Component,
+        C: 'static,
     {
-        let type_ident = TypeId::of::<C>();
-        let boxed = Box::new(component);
-
-        self.components.entry(type_ident).or_default().insert(entity, boxed);
-    }
-
-    pub fn remove_component<C>(&mut self, entity: Entity)
-    where
-        C: Component,
-    {
-        let type_ident = TypeId::of::<C>();
-
-        self.components.get_mut(&type_ident).and_then(|outer| outer.remove(&entity));
-    }
-
-    pub fn get_component<C>(&self, entity: Entity) -> Option<&C>
-    where
-        C: Component,
-    {
-        let type_ident = TypeId::of::<C>();
-
-        /* this line is kind of ridiculous */
-        // basically, grab the original type (outer hashmap) based on the
-        // generic C, then take the actual data stored on Id. this has to be
-        // recast to the C's type, so cast as Any and re(down)cast to C
         self.components
-            .get(&type_ident)
-            .and_then(|outer| outer.get(&entity))
-            .and_then(|inner| inner.as_any().downcast_ref())
+            .inner
+            .entry(TypeId::of::<C>())
+            .or_default()
+            .insert(entity, RefCell::new(Box::new(component)));
     }
+}
 
-    pub fn get_component_mut<C>(&mut self, entity: Entity) -> Option<&mut C>
-    where
-        C: Component,
-    {
-        let type_ident = TypeId::of::<C>();
+impl<Func> System for FnSystem<((),), Func>
+where
+    for<'a> &'a mut Func: FnMut(),
+{
+    fn run(&mut self, _: &mut ComponentMap) {
+        call_func(&mut self.func);
 
-        // exactly the same as above but does everything mutably
-        self.components
-            .get_mut(&type_ident)
-            .and_then(|outer| outer.get_mut(&entity))
-            .and_then(|inner| inner.as_any_mut().downcast_mut::<C>())
-    }
-
-    pub fn query_entities<C>(&self) -> impl Iterator<Item = Entity>
-    where
-        C: Component,
-    {
-        let type_ident = TypeId::of::<C>();
-
-        self.components.get(&type_ident).into_iter().flat_map(|outer| outer.keys().copied())
-    }
-
-    pub fn query_components<'d, C>(&'d self) -> Query<'d, C>
-    where
-        C: Component,
-    {
-        let type_ident = TypeId::of::<C>();
-
-        Query {
-            inner: self
-                .components
-                .get(&type_ident)
-                .into_iter()
-                .flat_map(|outer| outer.values())
-                .filter_map(|inner| inner.as_any().downcast_ref())
-                .collect(),
+        fn call_func<F>(mut func: F)
+        where
+            F: FnMut(),
+        {
+            func()
         }
     }
+}
 
-    pub fn query_components_mut<'d, C>(&'d mut self) -> QueryMut<'d, C>
-    where
-        C: Component,
-    {
-        let type_ident = TypeId::of::<C>();
+impl<Func, T0> System for FnSystem<(T0,), Func>
+where
+    for<'a, 'b> &'a mut Func: FnMut(T0) + FnMut(T0::Item<'b>),
+    T0: SystemArg,
+{
+    fn run(&mut self, map: &mut ComponentMap) {
+        let p0 = T0::fetch(map);
+        call_func(&mut self.func, p0);
 
-        QueryMut {
-            inner: self
-                .components
-                .get_mut(&type_ident)
-                .into_iter()
-                .flat_map(|outer| outer.values_mut())
-                .filter_map(|inner| inner.as_any_mut().downcast_mut())
-                .collect(),
+        fn call_func<T0, F>(mut func: F, p0: T0)
+        where
+            F: FnMut(T0),
+        {
+            func(p0)
         }
     }
+}
 
-    #[allow(dead_code)]
-    unsafe fn reset(&mut self) {
-        *self = Self::default()
+impl<Func, T0, T1> System for FnSystem<(T0, T1), Func>
+where
+    for<'a, 'b> &'a mut Func: FnMut(T0, T1) + FnMut(T0::Item<'b>, T1::Item<'b>),
+    T0: SystemArg,
+    T1: SystemArg,
+{
+    fn run(&mut self, map: &mut ComponentMap) {
+        let p0 = T0::fetch(map);
+        let p1 = T1::fetch(map);
+        call_func(&mut self.func, p0, p1);
+
+        fn call_func<T0, T1, F>(mut func: F, p0: T0, p1: T1)
+        where
+            F: FnMut(T0, T1),
+        {
+            func(p0, p1)
+        }
+    }
+}
+
+impl<Func, T0, T1, T2> System for FnSystem<(T0, T1, T2), Func>
+where
+    for<'a, 'b> &'a mut Func: FnMut(T0, T1, T2) + FnMut(T0::Item<'b>, T1::Item<'b>, T2::Item<'b>),
+    T0: SystemArg,
+    T1: SystemArg,
+    T2: SystemArg,
+{
+    fn run(&mut self, map: &mut ComponentMap) {
+        let p0 = T0::fetch(map);
+        let p1 = T1::fetch(map);
+        let p2 = T2::fetch(map);
+        call_func(&mut self.func, p0, p1, p2);
+
+        fn call_func<T0, T1, T2, F>(mut func: F, p0: T0, p1: T1, p2: T2)
+        where
+            F: FnMut(T0, T1, T2),
+        {
+            func(p0, p1, p2)
+        }
+    }
+}
+
+impl<Func> SystemBuilder<()> for Func
+where
+    for<'a> &'a mut Func: FnMut(),
+    Func: FnMut(),
+{
+    type System = FnSystem<((),), Self>;
+
+    fn build_system(self) -> Self::System {
+        FnSystem { func: self, marker: PhantomData }
+    }
+}
+
+impl<Func, T0> SystemBuilder<(T0,)> for Func
+where
+    for<'a, 'b> &'a mut Func: FnMut(T0) + FnMut(T0::Item<'b>),
+    Func: FnMut(T0),
+    T0: SystemArg,
+{
+    type System = FnSystem<(T0,), Self>;
+
+    fn build_system(self) -> Self::System {
+        FnSystem { func: self, marker: PhantomData }
+    }
+}
+
+impl<Func, T0, T1> SystemBuilder<(T0, T1)> for Func
+where
+    for<'a, 'b> &'a mut Func: FnMut(T0, T1) + FnMut(T0::Item<'b>, T1::Item<'b>),
+    Func: FnMut(T0, T1),
+    T0: SystemArg,
+    T1: SystemArg,
+{
+    type System = FnSystem<(T0, T1), Self>;
+
+    fn build_system(self) -> Self::System {
+        FnSystem { func: self, marker: PhantomData }
+    }
+}
+
+impl<Func, T0, T1, T2> SystemBuilder<(T0, T1, T2)> for Func
+where
+    for<'a, 'b> &'a mut Func: FnMut(T0, T1, T2) + FnMut(T0::Item<'b>, T1::Item<'b>, T2::Item<'b>),
+    Func: FnMut(T0, T1, T2),
+    T0: SystemArg,
+    T1: SystemArg,
+    T2: SystemArg,
+{
+    type System = FnSystem<(T0, T1, T2), Self>;
+
+    fn build_system(self) -> Self::System {
+        FnSystem { func: self, marker: PhantomData }
+    }
+}
+
+pub struct Query<'d, T> {
+    inner: Vec<Ref<'d, Box<dyn Any>>>,
+    marker: PhantomData<&'d T>,
+}
+
+impl<'d, T> IntoIterator for &'d Query<'d, T>
+where
+    T: 'static,
+{
+    type Item = &'d T;
+
+    type IntoIter = std::vec::IntoIter<&'d T>;
+
+    #[rustfmt::skip]
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner
+            .iter()
+            .filter_map(|val| (val).downcast_ref())
+            .collect::<Vec<&'d T>>()
+            .into_iter()
+    }
+}
+
+pub struct QueryMut<'d, T> {
+    inner: Vec<RefMut<'d, Box<dyn Any>>>,
+    marker: PhantomData<&'d mut T>,
+}
+
+pub struct QueryIterMut<'d, T> {
+    inner: std::vec::IntoIter<RefMut<'d, Box<dyn Any>>>,
+    marker: PhantomData<&'d mut T>,
+}
+
+impl<'d, T> IntoIterator for QueryMut<'d, T>
+where
+    T: 'static,
+{
+    type Item = RefMut<'d, T>;
+
+    type IntoIter = QueryIterMut<'d, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        QueryIterMut { inner: self.inner.into_iter(), marker: PhantomData }
+    }
+}
+
+impl<'d, T> Iterator for QueryIterMut<'d, T>
+where
+    T: 'static,
+{
+    type Item = RefMut<'d, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        todo!()
+    }
+}
+
+impl<'d, T> SystemArg for Query<'d, T>
+where
+    T: 'static,
+{
+    type Item<'o> = Query<'o, T>;
+
+    fn fetch<'i>(components: &'i ComponentMap) -> Self::Item<'i> {
+        components.query_components()
+    }
+}
+
+impl<'d, T> SystemArg for QueryMut<'d, T>
+where
+    T: 'static,
+{
+    type Item<'o> = QueryMut<'o, T>;
+
+    fn fetch<'i>(components: &'i ComponentMap) -> Self::Item<'i> {
+        components.query_components_mut()
     }
 }
 
 #[cfg(test)]
-mod glmutable_test {
-    use std::hint::black_box;
-
-    use super::*;
-
-    impl Component for FooBarStruct {}
-    #[derive(Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    struct FooBarStruct {
-        field: i32,
-    }
-
-    #[test]
-    #[allow(clippy::unit_cmp)]
-    fn glmut_init() {
-        let master = master();
-        black_box(&master);
-        assert!(drop(master) == ());
-    }
-
-    #[test]
-    fn glmut_insert() {
-        let mut master = master();
-        unsafe {
-            master.reset();
-        }
-        let ent = master.create_entity();
-        let cmp = FooBarStruct::default();
-        master.add_component(ent, cmp);
-        assert!(master.components.len() == 1);
-    }
-
-    #[test]
-    fn glmut_destroy() {
-        let mut master = master();
-        unsafe {
-            master.reset();
-        }
-        let ent = master.create_entity();
-        let cmp = FooBarStruct::default();
-        master.add_component(ent, cmp);
-        master.destroy_entity(ent);
-        assert!(master.get_component::<FooBarStruct>(ent).is_none());
-    }
-
-    #[test]
-    fn glmut_get() {
-        let mut master = master();
-        unsafe {
-            master.reset();
-        }
-        let ent = master.create_entity();
-        let cmp = FooBarStruct::default();
-        master.add_component(ent, cmp);
-        assert!(*master.get_component::<FooBarStruct>(ent).unwrap() == FooBarStruct::default());
-    }
-
-    #[test]
-    fn glmut_get_mut() {
-        let mut master = master();
-        unsafe {
-            master.reset();
-        }
-        let ent = master.create_entity();
-        let cmp = FooBarStruct::default();
-        master.add_component(ent, cmp);
-
-        let query = master.get_component_mut::<FooBarStruct>(ent);
-        assert!(query.is_some());
-
-        query.unwrap().field = 33;
-        assert!(master.get_component::<FooBarStruct>(ent).unwrap().field == 33);
-    }
-
-    #[test]
-    fn glmut_query() {
-        let mut master = master();
-        unsafe {
-            master.reset();
-        }
-        let ent1 = master.create_entity();
-        let cmp = FooBarStruct::default();
-        master.add_component(ent1, cmp);
-
-        {
-            let query = master.query_entities::<FooBarStruct>();
-            let counter = query.count();
-            assert!(counter == 1, "counted: {}", counter);
-        }
-
-        let ent2 = master.create_entity();
-        master.add_component(ent2, cmp);
-
-        {
-            let query = master.query_entities::<FooBarStruct>();
-            let counter = query.count();
-            assert!(counter == 2, "counted: {}", counter);
-        }
-    }
-}
+mod tests {}
