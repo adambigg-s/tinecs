@@ -59,7 +59,15 @@ impl ComponentMap {
     where
         C: 'static,
     {
-        todo!()
+        QueryMut {
+            inner: self
+                .get(&TypeId::of::<C>())
+                .into_iter()
+                .flat_map(|outer| outer.values())
+                .map(|inner| inner.borrow_mut())
+                .collect(),
+            marker: PhantomData,
+        }
     }
 }
 
@@ -193,6 +201,31 @@ where
     }
 }
 
+impl<Func, T0, T1, T2, T3> System for FnSystem<(T0, T1, T2, T3), Func>
+where
+    for<'a, 'b> &'a mut Func:
+        FnMut(T0, T1, T2, T3) + FnMut(T0::Item<'b>, T1::Item<'b>, T2::Item<'b>, T3::Item<'b>),
+    T0: SystemArg,
+    T1: SystemArg,
+    T2: SystemArg,
+    T3: SystemArg,
+{
+    fn run(&mut self, map: &mut ComponentMap) {
+        let p0 = T0::fetch(map);
+        let p1 = T1::fetch(map);
+        let p2 = T2::fetch(map);
+        let p3 = T3::fetch(map);
+        call_func(&mut self.func, p0, p1, p2, p3);
+
+        fn call_func<T0, T1, T2, T3, F>(mut func: F, p0: T0, p1: T1, p2: T2, p3: T3)
+        where
+            F: FnMut(T0, T1, T2, T3),
+        {
+            func(p0, p1, p2, p3)
+        }
+    }
+}
+
 impl<Func> SystemBuilder<()> for Func
 where
     for<'a> &'a mut Func: FnMut(),
@@ -247,8 +280,30 @@ where
     }
 }
 
+impl<Func, T0, T1, T2, T3> SystemBuilder<(T0, T1, T2, T3)> for Func
+where
+    for<'a, 'b> &'a mut Func:
+        FnMut(T0, T1, T2, T3) + FnMut(T0::Item<'b>, T1::Item<'b>, T2::Item<'b>, T3::Item<'b>),
+    Func: FnMut(T0, T1, T2, T3),
+    T0: SystemArg,
+    T1: SystemArg,
+    T2: SystemArg,
+    T3: SystemArg,
+{
+    type System = FnSystem<(T0, T1, T2, T3), Self>;
+
+    fn build_system(self) -> Self::System {
+        FnSystem { func: self, marker: PhantomData }
+    }
+}
+
 pub struct Query<'d, T> {
     inner: Vec<Ref<'d, Box<dyn Any>>>,
+    marker: PhantomData<&'d T>,
+}
+
+pub struct QueryIter<'d, T> {
+    inner: std::vec::IntoIter<&'d T>,
     marker: PhantomData<&'d T>,
 }
 
@@ -258,15 +313,38 @@ where
 {
     type Item = &'d T;
 
-    type IntoIter = std::vec::IntoIter<&'d T>;
+    type IntoIter = QueryIter<'d, T>;
 
     #[rustfmt::skip]
     fn into_iter(self) -> Self::IntoIter {
+        QueryIter {
+            inner:
         self.inner
             .iter()
             .filter_map(|val| (val).downcast_ref())
             .collect::<Vec<&'d T>>()
-            .into_iter()
+            .into_iter(),
+        marker   : PhantomData
+        }
+    }
+}
+
+impl<'d, T> Iterator for QueryIter<'d, T> {
+    type Item = &'d T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+}
+
+impl<'d, T> SystemArg for Query<'d, T>
+where
+    T: 'static,
+{
+    type Item<'o> = Query<'o, T>;
+
+    fn fetch<'i>(components: &'i ComponentMap) -> Self::Item<'i> {
+        components.query_components()
     }
 }
 
@@ -300,18 +378,7 @@ where
     type Item = RefMut<'d, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!()
-    }
-}
-
-impl<'d, T> SystemArg for Query<'d, T>
-where
-    T: 'static,
-{
-    type Item<'o> = Query<'o, T>;
-
-    fn fetch<'i>(components: &'i ComponentMap) -> Self::Item<'i> {
-        components.query_components()
+        Some(RefMut::map(self.inner.next()?, |val| val.downcast_mut().unwrap()))
     }
 }
 

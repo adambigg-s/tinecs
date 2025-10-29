@@ -20,6 +20,7 @@ fn main() {
 
     master.add_system(change_names);
     master.run();
+    master.run();
 }
 
 fn greetings() {
