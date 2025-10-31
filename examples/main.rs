@@ -1,11 +1,14 @@
 // basically, this just copies the `Bevy QuickStart` guide
 
+use tinecs::{
+    Component, Master,
+    arguments::{Query, QueryMut},
+};
+
 impl Component for NameTag {}
 struct NameTag {
     name: String,
 }
-
-use tinecs::{Component, Master, Query, QueryMut};
 
 fn main() {
     let mut master = Master::default();
