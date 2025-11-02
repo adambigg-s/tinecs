@@ -20,15 +20,26 @@ pub struct Entity {
     id: usize,
 }
 
-pub trait Component: Any + Send + Sync {}
-
-pub trait RepresentAsAny {
-    fn as_any(&self) -> &dyn Any;
-
-    fn as_any_mut(&mut self) -> &mut dyn Any;
+impl<Id> From<Id> for Entity
+where
+    Id: Into<usize>,
+{
+    fn from(value: Id) -> Self {
+        Self { id: value.into() }
+    }
 }
 
-impl RepresentAsAny for dyn Component {
+impl Deref for Entity {
+    type Target = usize;
+
+    fn deref(&self) -> &Self::Target {
+        &self.id
+    }
+}
+
+pub trait Component: Any + Send + Sync {}
+
+impl dyn Component {
     fn as_any(&self) -> &dyn Any {
         self as &dyn Any
     }
@@ -43,6 +54,15 @@ where
     Self: Send + Sync,
 {
     fn run(&mut self, map: &mut ComponentMap);
+}
+
+impl<S> From<Box<S>> for Box<dyn System>
+where
+    S: System + 'static,
+{
+    fn from(value: Box<S>) -> Self {
+        value
+    }
 }
 
 static MASTER: LazyLock<Mutex<Master>> = LazyLock::new(|| Mutex::new(Master::default()));
@@ -125,18 +145,10 @@ impl Master {
         out
     }
 
-    pub fn run(&mut self) {
-        for system in self.systems.iter_mut() {
-            system.run(&mut self.components);
-        }
-    }
-
-    pub fn add_system<A, I, S>(&mut self, system: A)
-    where
-        A: SystemBuilder<I, System = S>,
-        S: System + 'static,
-    {
-        self.systems.push(Box::new(system.build_system()));
+    pub fn destroy_entity(&mut self, entity: Entity) {
+        self.components.values_mut().for_each(|component| {
+            component.remove(&entity);
+        });
     }
 
     pub fn add_component<C>(&mut self, entity: Entity, component: C)
@@ -148,6 +160,35 @@ impl Master {
             .entry(TypeId::of::<C>())
             .or_default()
             .insert(entity, RefCell::new(Box::new(component)));
+    }
+
+    pub fn remove_component<C>(&mut self, entity: Entity)
+    where
+        C: Component + 'static,
+    {
+        self.components.inner.get_mut(&TypeId::of::<C>()).and_then(|outer| outer.remove(&entity));
+    }
+
+    pub fn run(&mut self) {
+        for system in self.systems.iter_mut() {
+            system.run(&mut self.components);
+        }
+    }
+
+    pub fn add_system<A, I, S>(&mut self, system: A)
+    where
+        A: SystemBuilder<I, System = S> + Copy,
+        S: System + 'static,
+    {
+        self.systems.push(Box::new(system.build_system()));
+    }
+
+    pub fn remove_system<A, I, S>(&mut self, system: A)
+    where
+        A: SystemBuilder<I, System = S> + Copy,
+        S: System + 'static,
+    {
+        self.systems.retain(|sys| (**sys).type_id() != system.build_system().type_id());
     }
 }
 

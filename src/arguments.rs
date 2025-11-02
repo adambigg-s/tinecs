@@ -4,7 +4,7 @@ use std::{
     marker::PhantomData,
 };
 
-use crate::{Component, ComponentMap, RepresentAsAny, systems::SystemArg};
+use crate::{Component, ComponentMap, systems::SystemArg};
 
 pub struct Query<'d, T> {
     pub(crate) inner: Vec<Ref<'d, Box<dyn Component>>>,

@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use crate::{ComponentMap, System};
 
 pub trait SystemBuilder<In> {
-    type System: System;
+    type System;
 
     fn build_system(self) -> Self::System;
 }
