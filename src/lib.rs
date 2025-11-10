@@ -188,7 +188,7 @@ impl Master {
         A: SystemBuilder<I, System = S> + Copy,
         S: System + 'static,
     {
-        self.systems.retain(|sys| (**sys).type_id() != system.build_system().type_id());
+        self.systems.retain(|sys| (**sys).type_id() == system.build_system().type_id());
     }
 }
 

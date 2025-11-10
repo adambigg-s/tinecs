@@ -21,8 +21,13 @@ fn main() {
     master.add_system(greet_people);
     master.run();
 
+    master.remove_system(greetings);
+    master.remove_system(greet_people);
     master.add_system(change_names);
     master.run();
+
+    master.add_system(greetings);
+    master.add_system(greet_people);
     master.run();
 }
 
