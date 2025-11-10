@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    arguments::{Query, QueryMut},
+    arguments::{InnerCluster, InnerClusterMut, Query, QueryFilter, QueryMut},
     systems::SystemBuilder,
 };
 
@@ -86,7 +86,14 @@ pub struct ComponentMap {
 }
 
 impl ComponentMap {
-    fn query_components<'d, C>(&'d self) -> Query<'d, C>
+    fn has_component<C>(&self, entity: Entity) -> bool
+    where
+        C: 'static,
+    {
+        self.get(&TypeId::of::<C>()).map(|outer| outer.contains_key(&entity)).unwrap_or(false)
+    }
+
+    fn query_components<'d, C>(&'d self) -> Query<'d, C, ()>
     where
         C: 'static,
     {
@@ -94,14 +101,32 @@ impl ComponentMap {
             inner: self
                 .get(&TypeId::of::<C>())
                 .into_iter()
-                .flat_map(|outer| outer.values())
-                .map(|inner| inner.borrow())
+                .flat_map(|outer| outer.iter())
+                .map(|(entity, inner)| InnerCluster { entity: *entity, component: inner.borrow() })
                 .collect(),
             marker: PhantomData,
+            fmarker: PhantomData,
         }
     }
 
-    fn query_components_mut<'d, C>(&'d self) -> QueryMut<'d, C>
+    fn query_components_filtered<'d, C, F>(&'d self) -> Query<'d, C, F>
+    where
+        C: 'static,
+        F: QueryFilter,
+    {
+        Query {
+            inner: self
+                .query_components::<C>()
+                .inner
+                .into_iter()
+                .filter(|cluster| F::matches(self, cluster.entity))
+                .collect(),
+            marker: PhantomData,
+            fmarker: PhantomData,
+        }
+    }
+
+    fn query_components_mut<'d, C>(&'d self) -> QueryMut<'d, C, ()>
     where
         C: 'static,
     {
@@ -109,10 +134,28 @@ impl ComponentMap {
             inner: self
                 .get(&TypeId::of::<C>())
                 .into_iter()
-                .flat_map(|outer| outer.values())
-                .map(|inner| inner.borrow_mut())
+                .flat_map(|outer| outer.iter())
+                .map(|(entity, inner)| InnerClusterMut { entity: *entity, component: inner.borrow_mut() })
                 .collect(),
             marker: PhantomData,
+            fmarker: PhantomData,
+        }
+    }
+
+    fn query_components_mut_filtered<'d, C, F>(&'d self) -> QueryMut<'d, C, F>
+    where
+        C: 'static,
+        F: QueryFilter,
+    {
+        QueryMut {
+            inner: self
+                .query_components_mut::<C>()
+                .inner
+                .into_iter()
+                .filter(|cluster| F::matches(self, cluster.entity))
+                .collect(),
+            marker: PhantomData,
+            fmarker: PhantomData,
         }
     }
 }

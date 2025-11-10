@@ -7,3 +7,4 @@ edition = "2024"
 
 [dev-dependencies]
 euc = { git = "https://github.com/zesterer/euc.git" }
+nalgebra = "0.34.1"
