@@ -49,6 +49,24 @@ pub struct Query<'d, T, F = ()> {
     pub(crate) fmarker: PhantomData<F>,
 }
 
+impl<'d, T, F> Query<'d, T, F>
+where
+    T: Component + Any + 'static,
+    F: QueryFilter,
+{
+    pub fn make_singular(&'d self) -> &'d T {
+        let mut iter = self.inner.iter().filter_map(|cluster| cluster.component.as_any().downcast_ref());
+        let first = iter.next();
+        if first.is_none() {
+            panic!("can't be made singular: null");
+        }
+        if iter.next().is_some() {
+            panic!("can't be made singular: non-singular");
+        }
+        first.unwrap()
+    }
+}
+
 pub struct QueryIter<'d, T> {
     inner: std::vec::IntoIter<&'d T>,
     marker: PhantomData<&'d T>,
@@ -106,27 +124,44 @@ pub struct QueryMut<'d, T, F = ()> {
     pub(crate) fmarker: PhantomData<F>,
 }
 
-pub struct QueryIterMut<'d, T> {
-    inner: std::vec::IntoIter<InnerClusterMut<'d>>,
-    marker: PhantomData<&'d mut T>,
-}
-
-impl<'d, T> IntoIterator for QueryMut<'d, T>
+impl<'d, T, F> QueryMut<'d, T, F>
 where
-    T: 'static,
+    T: Component + Any + 'static,
+    F: QueryFilter,
 {
-    type Item = RefMut<'d, T>;
-
-    type IntoIter = QueryIterMut<'d, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        QueryIterMut { inner: self.inner.into_iter(), marker: PhantomData }
+    pub fn make_singular_mut(&'d mut self) -> RefMut<'d, T> {
+        todo!()
     }
 }
 
-impl<'d, T> Iterator for QueryIterMut<'d, T>
+pub struct QueryIterMut<'d, T, F> {
+    inner: std::vec::IntoIter<InnerClusterMut<'d>>,
+    marker: PhantomData<&'d mut T>,
+    fmarker: PhantomData<F>,
+}
+
+impl<'d, T, F> IntoIterator for QueryMut<'d, T, F>
 where
     T: 'static,
+    F: QueryFilter,
+{
+    type Item = RefMut<'d, T>;
+
+    type IntoIter = QueryIterMut<'d, T, F>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        QueryIterMut {
+            inner: self.inner.into_iter(),
+            marker: PhantomData,
+            fmarker: PhantomData,
+        }
+    }
+}
+
+impl<'d, T, F> Iterator for QueryIterMut<'d, T, F>
+where
+    T: 'static,
+    F: QueryFilter,
 {
     type Item = RefMut<'d, T>;
 
@@ -137,11 +172,12 @@ where
     }
 }
 
-impl<'d, T> SystemArg for QueryMut<'d, T>
+impl<'d, T, F> SystemArg for QueryMut<'d, T, F>
 where
     T: 'static,
+    F: QueryFilter,
 {
-    type Item<'o> = QueryMut<'o, T>;
+    type Item<'o> = QueryMut<'o, T, F>;
 
     fn fetch<'i>(components: &'i ComponentMap) -> Self::Item<'i> {
         components.query_components_mut_filtered()

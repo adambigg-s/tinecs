@@ -233,6 +233,20 @@ impl Master {
     {
         self.systems.retain(|sys| (**sys).type_id() == system.build_system().type_id());
     }
+
+    pub fn query<'d, C>(&'d self) -> Query<'d, C>
+    where
+        C: 'static,
+    {
+        self.components.query_components::<C>()
+    }
+
+    pub fn query_mut<'d, C>(&'d self) -> QueryMut<'d, C>
+    where
+        C: 'static,
+    {
+        self.components.query_components_mut::<C>()
+    }
 }
 
 #[cfg(test)]

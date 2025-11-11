@@ -7,4 +7,5 @@ edition = "2024"
 
 [dev-dependencies]
 euc = { git = "https://github.com/zesterer/euc.git" }
+minifb = "0.28.0"
 nalgebra = "0.34.1"
