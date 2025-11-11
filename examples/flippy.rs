@@ -1,109 +1,31 @@
-use euc::{Buffer2d, IndexedVertices, Pipeline, Target, TriangleList};
+use std::sync::Arc;
+
+use euc::{Buffer2d, DepthMode, IndexedVertices, Pipeline, Target, TriangleList};
 use minifb::{Key, Window, WindowOptions};
-use nalgebra::{Matrix3, Matrix4, SVector, Vector3, Vector4};
+use nalgebra::{Isometry3, Matrix3, Matrix4, Point3, SVector, Vector3, Vector4};
 use tinecs::{
     Component,
     arguments::{Query, QueryMut, With},
     master,
 };
 
-fn main() {
-    let [width, height] = [800, 600];
-    let mut window = Window::new("flippy floppy", width, height, WindowOptions::default()).unwrap();
-    let mut ecs = master();
+impl Component for DirectionCosine {}
+struct DirectionCosine(Matrix3<f32>);
 
-    #[rustfmt::skip]
-    let dcm = DirectionCosine(Matrix3::from_row_slice(&[
-        1.0, 0.0, 0.0,
-        0.0, 1.0, 0.0,
-        0.0, 0.0, 1.0,
-    ]));
-    #[rustfmt::skip]
-    let moi = InertialTensor(Matrix3::from_row_slice(&[
-        5.0, 0.0, 0.0,
-        0.0, 3.0, 0.0,
-        0.0, 0.0, 1.0,
-    ]));
-    #[rustfmt::skip]
-    let vel = AngularVelocity(Vector3::from_row_slice(&[
-        0.01, 1.0, 0.001,
-    ]));
-    let mut state = SVector::<f32, 21>::zeros();
-    state.rows_mut(0, 9).copy_from_slice(dcm.0.as_slice());
-    state.rows_mut(9, 9).copy_from_slice(moi.0.as_slice());
-    state.rows_mut(18, 3).copy_from_slice(vel.0.as_slice());
-    let integrator = Integrator {
-        state,
-        t: f32::default(),
-        dt: 0.01,
-        ddt: flippy_dymamics,
-        tolerance: 1e-6,
-    };
+impl Component for AngularVelocity {}
+struct AngularVelocity(Vector3<f32>);
 
-    let render_target = RenderTarget {
-        color: Buffer2d::fill([width, height], u32::default()),
-        depth: Buffer2d::fill([width, height], f32::MAX),
-    };
-    let camera = Camera {
-        view: Matrix4::new_translation(&nalgebra::Vector3::new(0.0, 0.0, -10.0)),
-        projection: Matrix4::new_perspective(
-            (width as f32) / (height as f32),
-            90.0_f32.to_radians(),
-            0.1,
-            100.0,
-        ),
-    };
-    let mesh = Renderable { vertices: VERTICES, indices: INDICES };
+impl Component for InertialTensor {}
+struct InertialTensor(Matrix3<f32>);
 
-    let object = ecs.create_entity();
-    let renderer = ecs.create_entity();
-    let viewer = ecs.create_entity();
-    ecs.add_component(object, moi);
-    ecs.add_component(object, vel);
-    ecs.add_component(object, dcm);
-    ecs.add_component(object, mesh);
-    ecs.add_component(object, integrator);
-    ecs.add_component(object, DynamicBody);
-    ecs.add_component(renderer, render_target);
-    ecs.add_component(viewer, camera);
-    ecs.add_system(integrate_body::<21>);
-    ecs.add_system(render_frame);
-
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        for RenderTarget { color, .. } in &ecs.query::<RenderTarget>() {
-            _ = window.update_with_buffer(color.raw(), width, height);
-        }
-
-        ecs.run();
-    }
-}
-
-fn render_frame(
-    camera: Query<Camera>,
-    mesh: Query<Renderable>,
-    object: Query<DirectionCosine, With<DynamicBody>>,
-    target: QueryMut<RenderTarget>,
-) {
-    let camera = camera.make_singular();
-    let mesh = mesh.make_singular();
-
-    for mut target in target {
-        target.color.clear(u32::default());
-        target.depth.clear(f32::MAX);
-        let (color, depth) = target.split_mut();
-        for DirectionCosine(object) in &object {
-            Cube {
-                transform: camera.projection * camera.view * object.to_homogeneous(),
-            }
-            .render(IndexedVertices::new(mesh.indices, mesh.vertices), color, depth);
-        }
-    }
-}
+impl Component for DynamicBody {}
+struct DynamicBody;
 
 impl Component for Renderable {}
+#[derive(Debug)]
 struct Renderable {
-    vertices: &'static [(Vector4<f32>, Vector4<f32>)],
-    indices: &'static [usize],
+    vertices: Arc<Vec<(Vector4<f32>, Vector4<f32>)>>,
+    indices: Arc<Vec<usize>>,
 }
 
 impl Component for Camera {}
@@ -124,23 +46,11 @@ impl RenderTarget {
     }
 }
 
-impl Component for DirectionCosine {}
-struct DirectionCosine(Matrix3<f32>);
-
-impl Component for AngularVelocity {}
-struct AngularVelocity(Vector3<f32>);
-
-impl Component for InertialTensor {}
-struct InertialTensor(Matrix3<f32>);
-
-impl Component for DynamicBody {}
-struct DynamicBody;
-
-struct Cube {
+struct RenderCall {
     transform: Matrix4<f32>,
 }
 
-impl<'d> Pipeline<'d> for Cube {
+impl<'d> Pipeline<'d> for RenderCall {
     type Vertex = (Vector4<f32>, Vector4<f32>);
 
     type VertexData = Vector4<f32>;
@@ -155,6 +65,10 @@ impl<'d> Pipeline<'d> for Cube {
         ((self.transform * pos).into(), *color)
     }
 
+    fn depth_mode(&self) -> euc::DepthMode {
+        DepthMode::LESS_WRITE
+    }
+
     fn fragment(&self, color: Self::VertexData) -> Self::Fragment {
         color
     }
@@ -165,6 +79,35 @@ impl<'d> Pipeline<'d> for Cube {
         let b = (color.z * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
         (r << 16) | (g << 8) | b
     }
+}
+
+fn flippy_dymamics<const N: usize>(input: &SVector<f32, N>) -> SVector<f32, N> {
+    let c = Matrix3::from_column_slice(input.rows(0, 9).as_slice());
+    let ic = Matrix3::from_column_slice(input.rows(9, 9).as_slice());
+    let w = Vector3::from_column_slice(input.rows(18, 3).as_slice());
+    let [i11, i22, i33] = [ic[(0, 0)], ic[(1, 1)], ic[(2, 2)]];
+    let [w1, w2, w3] = [w[0], w[1], w[2]];
+    #[rustfmt::skip]
+    let s = Matrix3::from_row_slice(&[
+        0.0 , -w.z, w.y ,
+        w.z , 0.0 , -w.x,
+        -w.y, w.x , 0.0 ,
+    ]);
+
+    let dcdt = s * c;
+    #[rustfmt::skip]
+    let dwdt = Vector3::new(
+        (i33 - i22) * w2 * w3 / i11,
+        (i11 - i33) * w3 * w1 / i22,
+        (i22 - i11) * w1 * w2 / i33,
+    );
+    let dicdt = Matrix3::<f32>::zeros();
+
+    let mut output = SVector::<f32, N>::zeros();
+    output.rows_mut(0, 9).copy_from_slice(dcdt.as_slice());
+    output.rows_mut(9, 9).copy_from_slice(dicdt.as_slice());
+    output.rows_mut(18, 3).copy_from_slice(dwdt.as_slice());
+    output
 }
 
 fn integrate_body<const N: usize>(
@@ -186,33 +129,135 @@ fn integrate_body<const N: usize>(
     }
 }
 
-fn flippy_dymamics<const N: usize>(input: &SVector<f32, N>) -> SVector<f32, N> {
-    let c = Matrix3::from_column_slice(input.rows(0, 9).as_slice());
-    let ic = Matrix3::from_column_slice(input.rows(9, 9).as_slice());
-    let w = Vector3::from_column_slice(input.rows(18, 3).as_slice());
-    let [i11, i22, i33] = [ic[(0, 0)], ic[(1, 1)], ic[(2, 2)]];
-    let [w1, w2, w3] = [w[0], w[1], w[2]];
+fn render_frame(
+    camera: Query<Camera>,
+    mesh: Query<Renderable>,
+    object: Query<DirectionCosine, With<DynamicBody>>,
+    target: QueryMut<RenderTarget>,
+) {
+    let camera = camera.make_singular();
+    let mesh = mesh.make_singular();
 
-    #[rustfmt::skip]
-    let s = Matrix3::from_row_slice(&[
-        0.0 , -w.z, w.y ,
-        w.z , 0.0 , -w.x,
-        -w.y, w.x , 0.0 ,
-    ]);
-    let dcdt = s * c;
-    #[rustfmt::skip]
-    let dwdt = Vector3::new(
-        (i33 - i22) * w2 * w3 / i11,
-        (i11 - i33) * w3 * w1 / i22,
-        (i22 - i11) * w1 * w2 / i33,
+    for mut target in target {
+        target.color.clear(u32::default());
+        target.depth.clear(f32::MAX);
+        let (color, depth) = target.split_mut();
+        for DirectionCosine(object) in &object {
+            RenderCall {
+                transform: camera.projection * camera.view * object.to_homogeneous(),
+            }
+            .render(
+                IndexedVertices::new(mesh.indices.as_slice(), mesh.vertices.as_slice()),
+                color,
+                depth,
+            );
+        }
+    }
+}
+
+fn main() {
+    let [width, height] = [800, 600];
+
+    physics_setup();
+    graphics_setup(width, height);
+
+    let mut window = Window::new("flippy floppy", width, height, WindowOptions::default()).unwrap();
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        for RenderTarget { color, .. } in &master().query::<RenderTarget>() {
+            window.update_with_buffer(color.raw(), width, height).unwrap();
+        }
+
+        master().run();
+    }
+}
+
+#[rustfmt::skip]
+fn physics_setup() {
+    let dcm = DirectionCosine(Matrix3::from_row_slice(&[
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    ]));
+    let moi = InertialTensor(Matrix3::from_row_slice(&[
+        15.0, 0.0, 0.0,
+        0.0, 5.0, 0.0,
+        0.0, 0.0, 3.5,
+    ]));
+    let vel = AngularVelocity(Vector3::from_row_slice(&[
+        0.001, 3.0, 0.001,
+    ]));
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut add_cuboid = |lengths, pos, color| {
+        let (verts, mut inds) = make_cuboid(lengths, pos, color);
+        inds.iter_mut().for_each(|idx| *idx += vertices.len());
+        vertices.extend_from_slice(&verts[..]);
+        indices.extend_from_slice(&inds);
+    };
+    add_cuboid(
+        Vector3::new(1.0, 1.0, 2.0),
+        Vector3::new(0.0, 0.0, 2.0),
+        Vector4::new(1.0, 0.0, 0.0, 1.0)
     );
-    let dicdt = Matrix3::<f32>::zeros();
+    add_cuboid(
+        Vector3::new(1.0, 1.0, 2.0),
+        Vector3::new(0.0, 0.0, -2.0),
+        Vector4::new(0.0, 1.0, 0.0, 1.0),
+    );
+    add_cuboid(
+        Vector3::new(1.0, 1.5, 1.0),
+        Vector3::new(0.0, 2.5, 0.0),
+        Vector4::new(0.0, 0.0, 1.0, 1.0)
+    );
+    let mesh = Renderable {
+        vertices: Arc::new(vertices),
+        indices: Arc::new(indices),
+    };
+    let mut state = SVector::<f32, 21>::zeros();
+    state.rows_mut(0, 9).copy_from_slice(dcm.0.as_slice());
+    state.rows_mut(9, 9).copy_from_slice(moi.0.as_slice());
+    state.rows_mut(18, 3).copy_from_slice(vel.0.as_slice());
+    let integrator = Integrator {
+        state,
+        t: f32::default(),
+        dt: 0.01,
+        ddt: flippy_dymamics,
+        tolerance: 1e-6,
+    };
 
-    let mut output = SVector::<f32, N>::zeros();
-    output.rows_mut(0, 9).copy_from_slice(dcdt.as_slice());
-    output.rows_mut(9, 9).copy_from_slice(dicdt.as_slice());
-    output.rows_mut(18, 3).copy_from_slice(dwdt.as_slice());
-    output
+    let mut ecs = master();
+    let object = ecs.create_entity();
+    ecs.add_component(object, moi);
+    ecs.add_component(object, vel);
+    ecs.add_component(object, dcm);
+    ecs.add_component(object, mesh);
+    ecs.add_component(object, integrator);
+    ecs.add_component(object, DynamicBody);
+    ecs.add_system(integrate_body::<21>);
+}
+
+fn graphics_setup(width: usize, height: usize) {
+    let render_target = RenderTarget {
+        color: Buffer2d::fill([width, height], u32::default()),
+        depth: Buffer2d::fill([width, height], f32::MAX),
+    };
+    let camera = Camera {
+        view: Isometry3::look_at_rh(&Point3::new(0.0, 5.0, -12.5), &Point3::origin(), &Vector3::y())
+            .to_matrix(),
+        projection: Matrix4::new_perspective(
+            (width as f32) / (height as f32),
+            90.0_f32.to_radians(),
+            0.1,
+            100.0,
+        ),
+    };
+
+    let mut ecs = master();
+    let renderer = ecs.create_entity();
+    let viewer = ecs.create_entity();
+    ecs.add_component(renderer, render_target);
+    ecs.add_component(viewer, camera);
+    ecs.add_system(render_frame);
 }
 
 impl<const N: usize> Component for Integrator<N> {}
@@ -226,6 +271,12 @@ struct Integrator<const N: usize> {
 }
 
 impl<const N: usize> Integrator<N> {
+    fn step(&mut self) -> SVector<f32, N> {
+        self.t += self.dt;
+        self.state = self.rk4();
+        self.state
+    }
+
     fn dynamic_step(&mut self) -> SVector<f32, N> {
         let mut oracle = *self;
         oracle.dt = self.dt * 0.5;
@@ -246,12 +297,6 @@ impl<const N: usize> Integrator<N> {
         self.state
     }
 
-    fn step(&mut self) -> SVector<f32, N> {
-        self.t += self.dt;
-        self.state = self.rk4();
-        self.state
-    }
-
     fn rk4(&self) -> SVector<f32, N> {
         let k1 = (self.ddt)(&self.state);
         let k2 = (self.ddt)(&(self.state + k1 * (self.dt / 2.0)));
@@ -262,23 +307,30 @@ impl<const N: usize> Integrator<N> {
     }
 }
 
-const R: Vector4<f32> = Vector4::new(1.0, 0.0, 0.0, 1.0);
-const Y: Vector4<f32> = Vector4::new(1.0, 1.0, 0.0, 1.0);
-const G: Vector4<f32> = Vector4::new(0.0, 1.0, 0.0, 1.0);
-const B: Vector4<f32> = Vector4::new(0.0, 0.0, 1.0, 1.0);
+#[rustfmt::skip]
+#[allow(clippy::type_complexity)]
+fn make_cuboid(
+    lengths: Vector3<f32>,
+    offset: Vector3<f32>,
+    color: Vector4<f32>,
+) -> ([(Vector4<f32>, Vector4<f32>); 8], Vec<usize>) {
+    let hetero = [
+        (Vector3::new(-lengths.x, -lengths.y, -lengths.z) + offset, color),
+        (Vector3::new(-lengths.x, -lengths.y, lengths.z)  + offset, color),
+        (Vector3::new(-lengths.x, lengths.y , -lengths.z) + offset, color),
+        (Vector3::new(-lengths.x, lengths.y , lengths.z)  + offset, color),
+        (Vector3::new(lengths.x , -lengths.y, -lengths.z) + offset, color),
+        (Vector3::new(lengths.x , -lengths.y, lengths.z)  + offset, color),
+        (Vector3::new(lengths.x , lengths.y , -lengths.z) + offset, color),
+        (Vector3::new(lengths.x , lengths.y , lengths.z)  + offset, color),
+    ];
+    let indices = [
+        0, 3, 2, 0, 1, 3, 7, 4, 6,
+        5, 4, 7, 5, 0, 4, 1, 0, 5,
+        2, 7, 6, 2, 3, 7, 0, 6, 4,
+        0, 2, 6, 7, 1, 5, 3, 1, 7,
+    ];
+    let homogenous = hetero.map(|(pos, color)| (pos.push(1.0), color));
 
-const VERTICES: &[(Vector4<f32>, Vector4<f32>)] = &[
-    (Vector4::new(-1.0, -1.0, -1.0, 1.0), R),
-    (Vector4::new(-1.0, -1.0, 1.0, 1.0), Y),
-    (Vector4::new(-1.0, 1.0, -1.0, 1.0), G),
-    (Vector4::new(-1.0, 1.0, 1.0, 1.0), B),
-    (Vector4::new(1.0, -1.0, -1.0, 1.0), B),
-    (Vector4::new(1.0, -1.0, 1.0, 1.0), G),
-    (Vector4::new(1.0, 1.0, -1.0, 1.0), Y),
-    (Vector4::new(1.0, 1.0, 1.0, 1.0), R),
-];
-
-const INDICES: &[usize] = &[
-    0, 3, 2, 0, 1, 3, 7, 4, 6, 5, 4, 7, 5, 0, 4, 1, 0, 5, 2, 7, 6, 2, 3, 7, 0, 6, 4, 0, 2, 6, 7, 1, 5, 3, 1,
-    7,
-];
+    (homogenous, indices.to_vec())
+}
