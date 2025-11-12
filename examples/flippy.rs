@@ -46,11 +46,11 @@ impl RenderTarget {
     }
 }
 
-struct RenderCall {
+struct SolidUniform {
     transform: Matrix4<f32>,
 }
 
-impl<'d> Pipeline<'d> for RenderCall {
+impl<'d> Pipeline<'d> for SolidUniform {
     type Vertex = (Vector4<f32>, Vector4<f32>);
 
     type VertexData = Vector4<f32>;
@@ -61,23 +61,53 @@ impl<'d> Pipeline<'d> for RenderCall {
 
     type Pixel = u32;
 
+    #[inline(always)]
     fn vertex(&self, (pos, color): &Self::Vertex) -> ([f32; 4], Self::VertexData) {
         ((self.transform * pos).into(), *color)
     }
 
+    #[inline(always)]
     fn depth_mode(&self) -> euc::DepthMode {
         DepthMode::LESS_WRITE
     }
 
+    #[inline(always)]
     fn fragment(&self, color: Self::VertexData) -> Self::Fragment {
         color
     }
 
+    #[inline(always)]
     fn blend(&self, _: Self::Pixel, color: Self::Fragment) -> Self::Pixel {
         let r = (color.x * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
         let g = (color.y * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
         let b = (color.z * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
         (r << 16) | (g << 8) | b
+    }
+}
+
+struct ShadowUniform {}
+
+impl<'d> Pipeline<'d> for ShadowUniform {
+    type Vertex = ();
+
+    type VertexData = euc::Unit;
+
+    type Primitives = TriangleList;
+
+    type Fragment = euc::Unit;
+
+    type Pixel = ();
+
+    fn vertex(&self, vertex: &Self::Vertex) -> ([f32; 4], Self::VertexData) {
+        todo!()
+    }
+
+    fn fragment(&self, vs_out: Self::VertexData) -> Self::Fragment {
+        todo!()
+    }
+
+    fn blend(&self, old: Self::Pixel, new: Self::Fragment) -> Self::Pixel {
+        todo!()
     }
 }
 
@@ -143,7 +173,7 @@ fn render_frame(
         target.depth.clear(f32::MAX);
         let (color, depth) = target.split_mut();
         for DirectionCosine(object) in &object {
-            RenderCall {
+            SolidUniform {
                 transform: camera.projection * camera.view * object.to_homogeneous(),
             }
             .render(

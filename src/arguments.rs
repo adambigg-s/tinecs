@@ -130,7 +130,14 @@ where
     F: QueryFilter,
 {
     pub fn make_singular_mut(&'d mut self) -> RefMut<'d, T> {
-        todo!()
+        if self.inner.is_empty() {
+            panic!("can't be made singular: null");
+        }
+        if self.inner.len() > 1 {
+            panic!("can't be made singular: non-singular");
+        }
+        let single = self.inner.pop().unwrap();
+        RefMut::map(single.component, |value| value.as_any_mut().downcast_mut().unwrap())
     }
 }
 
