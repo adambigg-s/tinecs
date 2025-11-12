@@ -1,8 +1,9 @@
-# tinecs
-minimalist entity-component-system generalized framework experiment in Rust
+use rand::random_range;
+use tinecs::{
+    Component, Master,
+    arguments::{Query, QueryMut, With},
+};
 
-## Example
-```rust
 impl Component for Robot {}
 struct Robot;
 
@@ -40,20 +41,3 @@ fn main() {
         ecs.run();
     }
 }
-```
-
-
-#### Within the 'examples' folder, there is a few others
-
-#### name_calling.rs
-Basically a clone of the Bevy quickstart guide, but using tinecs
-
-#### flippy.rs
-A dynamical simulation of a 'T'-handle like object spinning on the intermediate axis.
-
-This example is a good illustration of the strengths of ECS in simulation environments.
-
-This is the most contrived example, and uses some external crates like 'nalgebra' and 'euc' for matrix math and rendering.
-
-
-## Why?
