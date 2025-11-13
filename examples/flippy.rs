@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    ops::{Add, Mul},
+    sync::Arc,
+};
 
 use euc::{Buffer2d, DepthMode, IndexedVertices, Pipeline, Target, TriangleList};
 use minifb::{Key, Window, WindowOptions};
@@ -8,6 +11,10 @@ use tinecs::{
     arguments::{Query, QueryMut, With},
     master,
 };
+
+/*
+Components used
+*/
 
 impl Component for DynamicBody {}
 struct DynamicBody;
@@ -50,89 +57,19 @@ impl RenderTarget {
     }
 }
 
+impl<const N: usize> Component for Integrator<N> {}
 #[derive(Clone, Copy)]
-struct Vertex {
-    pos: Vector4<f32>,
-    col: Vector4<f32>,
-    nor: Vector3<f32>,
+struct Integrator<const N: usize> {
+    state: SVector<f32, N>,
+    t: f32,
+    dt: f32,
+    ddt: fn(&SVector<f32, N>) -> SVector<f32, N>,
+    tolerance: f32,
 }
 
-struct SolidUniform {
-    model: Matrix3<f32>,
-    view: Matrix4<f32>,
-    proj: Matrix4<f32>,
-    light: Vector3<f32>,
-}
-
-impl<'d> Pipeline<'d> for SolidUniform {
-    type Vertex = Vertex;
-
-    type VertexData = Vector4<f32>;
-
-    type Primitives = TriangleList;
-
-    type Fragment = Vector4<f32>;
-
-    type Pixel = u32;
-
-    #[inline(always)]
-    fn vertex(&self, vertex: &Self::Vertex) -> ([f32; 4], Self::VertexData) {
-        let world_pos = self.model.to_homogeneous() * vertex.pos;
-        let world_nor = self.model * vertex.nor;
-        let light_dir = (self.light - world_pos.xyz()).normalize();
-        let diffuse = world_nor.dot(&light_dir).clamp(0.0, 1.0).sqrt();
-        let gouraud = vertex.col * (0.25 + 0.75 * diffuse);
-
-        ((self.proj * self.view * world_pos).into(), gouraud)
-    }
-
-    #[inline(always)]
-    fn depth_mode(&self) -> DepthMode {
-        DepthMode::LESS_WRITE
-    }
-
-    #[inline(always)]
-    fn fragment(&self, color: Self::VertexData) -> Self::Fragment {
-        color
-    }
-
-    #[inline(always)]
-    fn blend(&self, _: Self::Pixel, color: Self::Fragment) -> Self::Pixel {
-        let r = (color.x * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
-        let g = (color.y * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
-        let b = (color.z * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
-        (r << 16) | (g << 8) | b
-    }
-}
-
-fn flippy_dymamics<const N: usize>(input: &SVector<f32, N>) -> SVector<f32, N> {
-    let c = Matrix3::from_column_slice(input.rows(0, 9).as_slice());
-    let ic = Matrix3::from_column_slice(input.rows(9, 9).as_slice());
-    let w = Vector3::from_column_slice(input.rows(18, 3).as_slice());
-    let [i11, i22, i33] = [ic[(0, 0)], ic[(1, 1)], ic[(2, 2)]];
-    let [w1, w2, w3] = [w[0], w[1], w[2]];
-    #[rustfmt::skip]
-    let s = Matrix3::from_row_slice(&[
-        0.0 , -w.z, w.y ,
-        w.z , 0.0 , -w.x,
-        -w.y, w.x , 0.0 ,
-    ]);
-
-    let dcdt = s * c;
-    #[rustfmt::skip]
-    let dwdt = Vector3::new(
-        (i33 - i22) * w2 * w3 / i11,
-        (i11 - i33) * w3 * w1 / i22,
-        (i22 - i11) * w1 * w2 / i33,
-    );
-    let dicdt = Matrix3::<f32>::zeros();
-
-    let mut output = SVector::<f32, N>::zeros();
-    output.rows_mut(0, 9).copy_from_slice(dcdt.as_slice());
-    output.rows_mut(9, 9).copy_from_slice(dicdt.as_slice());
-    output.rows_mut(18, 3).copy_from_slice(dwdt.as_slice());
-    output
-}
+/*
+Systems called by ECS
+*/
 
 fn integrate_body<const N: usize>(
     integrator: QueryMut<Integrator<N>, With<DynamicBody>>,
@@ -155,7 +92,7 @@ fn integrate_body<const N: usize>(
 
 fn render_frame(
     camera: Query<Camera>,
-    mesh: Query<Mesh>,
+    mesh: Query<Mesh, With<DynamicBody>>,
     object: Query<DirectionCosine, With<DynamicBody>>,
     light: Query<PointLight>,
     target: QueryMut<RenderTarget>,
@@ -184,6 +121,10 @@ fn render_frame(
     }
 }
 
+/*
+Entry point
+*/
+
 fn main() {
     let [width, height] = [800, 600];
 
@@ -200,6 +141,10 @@ fn main() {
         master().run();
     }
 }
+
+/*
+Scene setup functions (out of main for readability)
+*/
 
 #[rustfmt::skip]
 fn physics_setup() {
@@ -308,15 +253,93 @@ fn graphics_setup(width: usize, height: usize) {
     ecs.add_system(render_frame);
 }
 
-impl<const N: usize> Component for Integrator<N> {}
+/*
+Rendering stuff (not part of ECS)
+*/
+
 #[derive(Clone, Copy)]
-struct Integrator<const N: usize> {
-    state: SVector<f32, N>,
-    t: f32,
-    dt: f32,
-    ddt: fn(&SVector<f32, N>) -> SVector<f32, N>,
-    tolerance: f32,
+struct Vertex {
+    pos: Vector4<f32>,
+    col: Vector4<f32>,
+    nor: Vector3<f32>,
 }
+
+impl Add for Vertex {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self::Output {
+        Self {
+            pos: self.pos + other.pos,
+            col: self.col + other.col,
+            nor: self.nor + other.nor,
+        }
+    }
+}
+
+impl Mul<f32> for Vertex {
+    type Output = Self;
+
+    fn mul(self, scalar: f32) -> Self::Output {
+        Self {
+            pos: self.pos * scalar,
+            col: self.col * scalar,
+            nor: self.nor * scalar,
+        }
+    }
+}
+
+struct SolidUniform {
+    model: Matrix3<f32>,
+    view: Matrix4<f32>,
+    proj: Matrix4<f32>,
+    light: Vector3<f32>,
+}
+
+impl<'d> Pipeline<'d> for SolidUniform {
+    type Vertex = Vertex;
+
+    type VertexData = Vertex;
+
+    type Primitives = TriangleList;
+
+    type Fragment = Vector4<f32>;
+
+    type Pixel = u32;
+
+    #[inline(always)]
+    fn vertex(&self, vertex: &Self::Vertex) -> ([f32; 4], Self::VertexData) {
+        let world_pos = self.model.to_homogeneous() * vertex.pos;
+        let world_nor = self.model * vertex.nor;
+        let light_dir = (self.light - world_pos.xyz()).normalize();
+        let diffuse = world_nor.dot(&light_dir).clamp(0.0, 1.0).sqrt();
+        let gouraud = vertex.col * (0.25 + 0.75 * diffuse);
+        let clip_pos = self.proj * self.view * world_pos;
+
+        (clip_pos.into(), Vertex { pos: clip_pos, col: gouraud, nor: world_nor })
+    }
+
+    #[inline(always)]
+    fn depth_mode(&self) -> DepthMode {
+        DepthMode::LESS_WRITE
+    }
+
+    #[inline(always)]
+    fn fragment(&self, vertex: Self::VertexData) -> Self::Fragment {
+        vertex.col
+    }
+
+    #[inline(always)]
+    fn blend(&self, _: Self::Pixel, color: Self::Fragment) -> Self::Pixel {
+        let r = (color.x * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
+        let g = (color.y * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
+        let b = (color.z * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
+        (r << 16) | (g << 8) | b
+    }
+}
+
+/*
+Physics utilities
+*/
 
 impl<const N: usize> Integrator<N> {
     fn step(&mut self) -> SVector<f32, N> {
@@ -355,6 +378,35 @@ impl<const N: usize> Integrator<N> {
     }
 }
 
+#[rustfmt::skip]
+fn flippy_dymamics<const N: usize>(input: &SVector<f32, N>) -> SVector<f32, N> {
+    let dcm = Matrix3::from_column_slice(input.rows(0, 9).as_slice());
+    let ic = Matrix3::from_column_slice(input.rows(9, 9).as_slice());
+    let omega = Vector3::from_column_slice(input.rows(18, 3).as_slice());
+    let [i11, i22, i33] = [ic[(0, 0)], ic[(1, 1)], ic[(2, 2)]];
+    let [w1, w2, w3] = [omega[0], omega[1], omega[2]];
+    let skew = Matrix3::from_row_slice(&[
+        0.0, -w3, w2 ,
+        w3 , 0.0, -w1,
+        -w2, w1 , 0.0,
+    ]);
+
+    let dcdt = -skew * dcm;
+    let dwdt = Vector3::new(
+        (i33 - i22) * w2 * w3 / i11,
+        (i11 - i33) * w3 * w1 / i22,
+        (i22 - i11) * w1 * w2 / i33,
+    );
+    let dicdt = Matrix3::<f32>::zeros();
+
+    let mut output = SVector::<f32, N>::zeros();
+    output.rows_mut(0, 9).copy_from_slice(dcdt.as_slice());
+    output.rows_mut(9, 9).copy_from_slice(dicdt.as_slice());
+    output.rows_mut(18, 3).copy_from_slice(dwdt.as_slice());
+    output
+}
+
+#[rustfmt::skip]
 fn make_cuboid(
     lengths: Vector3<f32>,
     offset: Vector3<f32>,
@@ -367,7 +419,6 @@ fn make_cuboid(
     let ny = V::new(0.0, 1.0, 0.0);
     let nz = V::new(0.0, 0.0, 1.0);
 
-    #[rustfmt::skip]
     let positions = [
         V::new(-len.x, -len.y,  len.z), V::new( len.x, -len.y,  len.z), V::new( len.x,  len.y,  len.z),
         V::new(-len.x,  len.y,  len.z), V::new( len.x, -len.y, -len.z), V::new(-len.x, -len.y, -len.z),
@@ -379,25 +430,23 @@ fn make_cuboid(
         V::new( len.x, -len.y, -len.z), V::new( len.x, -len.y,  len.z), V::new(-len.x, -len.y,  len.z),
     ];
 
-    #[rustfmt::skip]
     let normals = [
-        nz, nz, nz, nz, -nz, -nz, -nz, -nz,
-        -nx, -nx, -nx, -nx, nx, nx, nx, nx,
-        ny, ny, ny, ny, -ny, -ny, -ny, -ny,
+         nz,  nz,  nz,  nz, -nz, -nz, -nz, -nz,
+        -nx, -nx, -nx, -nx,  nx,  nx,  nx,  nx,
+         ny,  ny,  ny,  ny, -ny, -ny, -ny, -ny,
     ];
 
-    let indices = (0..6)
-        .flat_map(|idx| {
-            let base = idx * 4;
-            [base, base + 1, base + 2, base, base + 2, base + 3]
-        })
-        .collect();
-
-    let vertices = positions
-        .iter()
-        .zip(normals.iter())
-        .map(|(pos, nor)| Vertex { pos: (pos + off).push(1.0), col, nor: *nor })
-        .collect();
-
-    (vertices, indices)
+    (
+        positions
+            .iter()
+            .zip(normals.iter())
+            .map(|(pos, nor)| Vertex { pos: (pos + off).push(1.0), col, nor: *nor })
+            .collect(),
+        (0..6)
+            .flat_map(|idx| {
+                let base = idx * 4;
+                [base, base + 1, base + 2, base, base + 2, base + 3]
+            })
+            .collect(),
+    )
 }

@@ -1,7 +1,9 @@
 # tinecs
 minimalist entity-component-system generalized framework experiment in Rust
 
-## Example
+## Examples
+
+### robot.rs
 ```rust
 use nalgebra::Vector2;
 use rand::random_range;
@@ -56,18 +58,35 @@ fn main() {
 }
 ```
 
-#### Within the 'examples' folder, there are a few others
+Displays the location of a 'robot' running around randomly
 
-#### name_calling.rs
-Basically a clone of the Bevy quickstart guide, but using tinecs
+### name_calling.rs
+Basically a one-to-one clone of the Bevy quickstart guide, but using tinecs
 
-#### flippy.rs
-A dynamical simulation of a 'T'-handle like object spinning on the intermediate axis.
+### flippy.rs
+A dynamical simulation of a 'T'-handle like object spinning on the intermediate axis
 
-This example is a good illustration of the strengths of ECS in simulation environments.
+This example is a good illustration of the strengths of ECS in simulation environments
 
-This is the most contrived example, and uses some external crates like 'nalgebra' and 'euc' for matrix math and rendering.
+This is the most contrived example, and uses some external crates like 'nalgebra' and 'euc' for matrix math and rendering
 
 ![alt text](https://github.com/adambigg-s/tinecs/blob/main/examples/media/triaxial.gif)
 
 ## Why?
+
+## Performance Benchmarks
+When running **fib_speed.rs**, we find that the ECS solution is around 34.3x slower. This sounds really bad, but when analyzing the optimized assembly, we find the total Fibonacci function is literally 5 instructions total -- so, this is basically the lowest overhead function possible.
+
+In other words, this is a fairly bad benchmark for real applications, as (35) x (basically zero) = (still basically zero), but is really good at giving an idea of how much overhead the ECS database lookup adds, when compared to directly altering a value.
+
+Basically, these scalar operations are overwhelmingly dominated by the HashMap queries.
+
+When running **matmul_speed.rs**, we find that the ECS is around 3.7x slower, which is actually still not great. But, in the grand scheme of things a 4x4 matrix similarity transformation is probably close to the smallest single system that would be implemented in a game/simulation. So, as complexity grows this number would approach 1x speed pretty quickly.
+
+## Fundamental Types
+
+## Resources
+- https://github.com/bevyengine/bevy.git
+- https://github.com/tokio-rs/axum.git
+- https://github.com/PROMETHIA-27/dependency_injection_like_bevy_from_scratch.git
+
