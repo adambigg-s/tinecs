@@ -9,6 +9,9 @@ use tinecs::{
     master,
 };
 
+impl Component for DynamicBody {}
+struct DynamicBody;
+
 impl Component for DirectionCosine {}
 struct DirectionCosine(Matrix3<f32>);
 
@@ -18,13 +21,14 @@ struct AngularVelocity(Vector3<f32>);
 impl Component for InertialTensor {}
 struct InertialTensor(Matrix3<f32>);
 
-impl Component for DynamicBody {}
-struct DynamicBody;
+impl Component for PointLight {}
+struct PointLight {
+    pos: Vector3<f32>,
+}
 
-impl Component for Renderable {}
-#[derive(Debug)]
-struct Renderable {
-    vertices: Arc<Vec<(Vector4<f32>, Vector4<f32>)>>,
+impl Component for Mesh {}
+struct Mesh {
+    vertices: Arc<Vec<Vertex>>,
     indices: Arc<Vec<usize>>,
 }
 
@@ -46,12 +50,22 @@ impl RenderTarget {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Vertex {
+    pos: Vector4<f32>,
+    col: Vector4<f32>,
+    nor: Vector3<f32>,
+}
+
 struct SolidUniform {
-    transform: Matrix4<f32>,
+    model: Matrix3<f32>,
+    view: Matrix4<f32>,
+    proj: Matrix4<f32>,
+    light: Vector3<f32>,
 }
 
 impl<'d> Pipeline<'d> for SolidUniform {
-    type Vertex = (Vector4<f32>, Vector4<f32>);
+    type Vertex = Vertex;
 
     type VertexData = Vector4<f32>;
 
@@ -62,12 +76,18 @@ impl<'d> Pipeline<'d> for SolidUniform {
     type Pixel = u32;
 
     #[inline(always)]
-    fn vertex(&self, (pos, color): &Self::Vertex) -> ([f32; 4], Self::VertexData) {
-        ((self.transform * pos).into(), *color)
+    fn vertex(&self, vertex: &Self::Vertex) -> ([f32; 4], Self::VertexData) {
+        let world_pos = self.model.to_homogeneous() * vertex.pos;
+        let world_nor = self.model * vertex.nor;
+        let light_dir = (self.light - world_pos.xyz()).normalize();
+        let diffuse = world_nor.dot(&light_dir).clamp(0.0, 1.0).sqrt();
+        let gouraud = vertex.col * (0.25 + 0.75 * diffuse);
+
+        ((self.proj * self.view * world_pos).into(), gouraud)
     }
 
     #[inline(always)]
-    fn depth_mode(&self) -> euc::DepthMode {
+    fn depth_mode(&self) -> DepthMode {
         DepthMode::LESS_WRITE
     }
 
@@ -82,32 +102,6 @@ impl<'d> Pipeline<'d> for SolidUniform {
         let g = (color.y * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
         let b = (color.z * u8::MAX as f32).clamp(0.0, u8::MAX as f32) as u32;
         (r << 16) | (g << 8) | b
-    }
-}
-
-struct ShadowUniform {}
-
-impl<'d> Pipeline<'d> for ShadowUniform {
-    type Vertex = ();
-
-    type VertexData = euc::Unit;
-
-    type Primitives = TriangleList;
-
-    type Fragment = euc::Unit;
-
-    type Pixel = ();
-
-    fn vertex(&self, vertex: &Self::Vertex) -> ([f32; 4], Self::VertexData) {
-        todo!()
-    }
-
-    fn fragment(&self, vs_out: Self::VertexData) -> Self::Fragment {
-        todo!()
-    }
-
-    fn blend(&self, old: Self::Pixel, new: Self::Fragment) -> Self::Pixel {
-        todo!()
     }
 }
 
@@ -147,7 +141,7 @@ fn integrate_body<const N: usize>(
 ) {
     let mut state = SVector::zeros();
     for mut integrator in integrator {
-        integrator.step();
+        integrator.dynamic_step();
         state = integrator.state;
     }
 
@@ -161,12 +155,14 @@ fn integrate_body<const N: usize>(
 
 fn render_frame(
     camera: Query<Camera>,
-    mesh: Query<Renderable>,
+    mesh: Query<Mesh>,
     object: Query<DirectionCosine, With<DynamicBody>>,
+    light: Query<PointLight>,
     target: QueryMut<RenderTarget>,
 ) {
     let camera = camera.make_singular();
     let mesh = mesh.make_singular();
+    let light = light.make_singular();
 
     for mut target in target {
         target.color.clear(u32::default());
@@ -174,7 +170,10 @@ fn render_frame(
         let (color, depth) = target.split_mut();
         for DirectionCosine(object) in &object {
             SolidUniform {
-                transform: camera.projection * camera.view * object.to_homogeneous(),
+                model: *object,
+                view: camera.view,
+                proj: camera.projection,
+                light: light.pos,
             }
             .render(
                 IndexedVertices::new(mesh.indices.as_slice(), mesh.vertices.as_slice()),
@@ -195,6 +194,7 @@ fn main() {
     while window.is_open() && !window.is_key_down(Key::Escape) {
         for RenderTarget { color, .. } in &master().query::<RenderTarget>() {
             window.update_with_buffer(color.raw(), width, height).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(15));
         }
 
         master().run();
@@ -211,10 +211,10 @@ fn physics_setup() {
     let moi = InertialTensor(Matrix3::from_row_slice(&[
         15.0, 0.0, 0.0,
         0.0, 5.0, 0.0,
-        0.0, 0.0, 3.5,
+        0.0, 0.0, 4.0,
     ]));
     let vel = AngularVelocity(Vector3::from_row_slice(&[
-        0.001, 3.0, 0.001,
+        0.05, 3.5, 0.25,
     ]));
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
@@ -227,19 +227,34 @@ fn physics_setup() {
     add_cuboid(
         Vector3::new(1.0, 1.0, 2.0),
         Vector3::new(0.0, 0.0, 2.0),
-        Vector4::new(1.0, 0.0, 0.0, 1.0)
+        Vector4::new(0.7, 0.7, 0.7, 1.0),
     );
     add_cuboid(
         Vector3::new(1.0, 1.0, 2.0),
         Vector3::new(0.0, 0.0, -2.0),
-        Vector4::new(0.0, 1.0, 0.0, 1.0),
+        Vector4::new(0.7, 0.7, 0.7, 1.0),
     );
     add_cuboid(
         Vector3::new(1.0, 1.5, 1.0),
         Vector3::new(0.0, 2.5, 0.0),
-        Vector4::new(0.0, 0.0, 1.0, 1.0)
+        Vector4::new(0.7, 0.7, 0.7, 1.0),
     );
-    let mesh = Renderable {
+    add_cuboid(
+        Vector3::new(0.85, 0.85, 0.1),
+        Vector3::new(0.0, 0.0, 4.1),
+        Vector4::new(1.0, 0.0, 0.0, 1.0),
+    );
+    add_cuboid(
+        Vector3::new(0.85, 0.85, 0.1),
+        Vector3::new(0.0, 0.0, -4.1),
+        Vector4::new(0.0, 1.0, 0.0, 1.0),
+    );
+    add_cuboid(
+        Vector3::new(0.85, 0.1, 0.85),
+        Vector3::new(0.0, 4.1, 0.0),
+        Vector4::new(0.0, 0.0, 1.0, 1.0),
+    );
+    let mesh = Mesh {
         vertices: Arc::new(vertices),
         indices: Arc::new(indices),
     };
@@ -281,12 +296,15 @@ fn graphics_setup(width: usize, height: usize) {
             100.0,
         ),
     };
+    let point_light = PointLight { pos: Vector3::new(-3.0, 8.0, -7.0) };
 
     let mut ecs = master();
     let renderer = ecs.create_entity();
     let viewer = ecs.create_entity();
+    let light = ecs.create_entity();
     ecs.add_component(renderer, render_target);
     ecs.add_component(viewer, camera);
+    ecs.add_component(light, point_light);
     ecs.add_system(render_frame);
 }
 
@@ -337,30 +355,49 @@ impl<const N: usize> Integrator<N> {
     }
 }
 
-#[rustfmt::skip]
-#[allow(clippy::type_complexity)]
 fn make_cuboid(
     lengths: Vector3<f32>,
     offset: Vector3<f32>,
     color: Vector4<f32>,
-) -> ([(Vector4<f32>, Vector4<f32>); 8], Vec<usize>) {
-    let hetero = [
-        (Vector3::new(-lengths.x, -lengths.y, -lengths.z) + offset, color),
-        (Vector3::new(-lengths.x, -lengths.y, lengths.z)  + offset, color),
-        (Vector3::new(-lengths.x, lengths.y , -lengths.z) + offset, color),
-        (Vector3::new(-lengths.x, lengths.y , lengths.z)  + offset, color),
-        (Vector3::new(lengths.x , -lengths.y, -lengths.z) + offset, color),
-        (Vector3::new(lengths.x , -lengths.y, lengths.z)  + offset, color),
-        (Vector3::new(lengths.x , lengths.y , -lengths.z) + offset, color),
-        (Vector3::new(lengths.x , lengths.y , lengths.z)  + offset, color),
-    ];
-    let indices = [
-        0, 3, 2, 0, 1, 3, 7, 4, 6,
-        5, 4, 7, 5, 0, 4, 1, 0, 5,
-        2, 7, 6, 2, 3, 7, 0, 6, 4,
-        0, 2, 6, 7, 1, 5, 3, 1, 7,
-    ];
-    let homogenous = hetero.map(|(pos, color)| (pos.push(1.0), color));
+) -> (Vec<Vertex>, Vec<usize>) {
+    type V = Vector3<f32>;
+    let (len, off, col) = (lengths, offset, color);
 
-    (homogenous, indices.to_vec())
+    let nx = V::new(1.0, 0.0, 0.0);
+    let ny = V::new(0.0, 1.0, 0.0);
+    let nz = V::new(0.0, 0.0, 1.0);
+
+    #[rustfmt::skip]
+    let positions = [
+        V::new(-len.x, -len.y,  len.z), V::new( len.x, -len.y,  len.z), V::new( len.x,  len.y,  len.z),
+        V::new(-len.x,  len.y,  len.z), V::new( len.x, -len.y, -len.z), V::new(-len.x, -len.y, -len.z),
+        V::new(-len.x,  len.y, -len.z), V::new( len.x,  len.y, -len.z), V::new(-len.x, -len.y, -len.z),
+        V::new(-len.x, -len.y,  len.z), V::new(-len.x,  len.y,  len.z), V::new(-len.x,  len.y, -len.z),
+        V::new( len.x, -len.y,  len.z), V::new( len.x, -len.y, -len.z), V::new( len.x,  len.y, -len.z),
+        V::new( len.x,  len.y,  len.z), V::new(-len.x,  len.y,  len.z), V::new( len.x,  len.y,  len.z),
+        V::new( len.x,  len.y, -len.z), V::new(-len.x,  len.y, -len.z), V::new(-len.x, -len.y, -len.z),
+        V::new( len.x, -len.y, -len.z), V::new( len.x, -len.y,  len.z), V::new(-len.x, -len.y,  len.z),
+    ];
+
+    #[rustfmt::skip]
+    let normals = [
+        nz, nz, nz, nz, -nz, -nz, -nz, -nz,
+        -nx, -nx, -nx, -nx, nx, nx, nx, nx,
+        ny, ny, ny, ny, -ny, -ny, -ny, -ny,
+    ];
+
+    let indices = (0..6)
+        .flat_map(|idx| {
+            let base = idx * 4;
+            [base, base + 1, base + 2, base, base + 2, base + 3]
+        })
+        .collect();
+
+    let vertices = positions
+        .iter()
+        .zip(normals.iter())
+        .map(|(pos, nor)| Vertex { pos: (pos + off).push(1.0), col, nor: *nor })
+        .collect();
+
+    (vertices, indices)
 }

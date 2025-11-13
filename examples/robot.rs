@@ -1,7 +1,7 @@
 use nalgebra::Vector2;
 use rand::random_range;
 use tinecs::{
-    Component, Master,
+    Component,
     arguments::{Query, QueryMut, With},
     master,
 };

@@ -56,7 +56,7 @@ fn main() {
 }
 ```
 
-#### Within the 'examples' folder, there is a few others
+#### Within the 'examples' folder, there are a few others
 
 #### name_calling.rs
 Basically a clone of the Bevy quickstart guide, but using tinecs
@@ -67,5 +67,7 @@ A dynamical simulation of a 'T'-handle like object spinning on the intermediate 
 This example is a good illustration of the strengths of ECS in simulation environments.
 
 This is the most contrived example, and uses some external crates like 'nalgebra' and 'euc' for matrix math and rendering.
+
+![alt text](https://github.com/adambigg-s/tinecs/blob/main/examples/media/triaxial.gif)
 
 ## Why?
