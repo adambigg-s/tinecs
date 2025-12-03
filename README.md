@@ -5,14 +5,6 @@ minimalist entity-component-system generalized framework experiment in Rust
 
 ### robot.rs
 ```rust
-use nalgebra::Vector2;
-use rand::random_range;
-use tinecs::{
-    Component, Master,
-    arguments::{Query, QueryMut, With},
-    master,
-};
-
 impl Component for Robot {}
 struct Robot;
 

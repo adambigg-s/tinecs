@@ -10,7 +10,7 @@ fn main() {
         conjugate_standard(&mut similarity_transformation);
     }
     println!(
-        "standard similarity transformation time: {}\nfib number: {}",
+        "standard similarity transformation time: {}\nmatrix: {}",
         start.elapsed().as_secs_f64(),
         similarity_transformation.mat_a
     );
@@ -24,7 +24,7 @@ fn main() {
         ecs.run();
     }
     println!(
-        "tiny-ecs similarity transformation time: {}\nfib number: {}",
+        "tiny-ecs similarity transformation time: {}\nmatrix: {}",
         start.elapsed().as_secs_f64(),
         ecs.query::<Conjugation>().make_singular().mat_a
     );
@@ -32,13 +32,13 @@ fn main() {
 
 #[inline(never)]
 fn conjugate_standard(matrices: &mut Conjugation) {
-    matrices.step();
+    matrices.transform();
 }
 
 #[inline(never)]
 fn conjugate_ecs(matrices: QueryMut<Conjugation>) {
     for mut matrices in matrices {
-        matrices.step();
+        matrices.transform();
     }
 }
 
@@ -57,7 +57,7 @@ impl Conjugation {
     }
 
     #[inline(never)]
-    pub fn step(&mut self) {
+    pub fn transform(&mut self) {
         self.mat_a = self.mat_p.transpose() * self.mat_a * self.mat_p;
     }
 }

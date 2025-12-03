@@ -3,7 +3,10 @@ use std::{
     sync::Arc,
 };
 
-use euc::{Buffer2d, DepthMode, IndexedVertices, Pipeline, Target, TriangleList};
+use euc::{
+    Buffer2d, CullMode, DepthMode, IndexedVertices, Pipeline, Target, TriangleList,
+    primitives::PrimitiveKind, rasterizer::Rasterizer,
+};
 use minifb::{Key, Window, WindowOptions};
 use nalgebra::{Isometry3, Matrix3, Matrix4, Point3, SVector, Vector3, Vector4};
 use tinecs::{
@@ -92,31 +95,23 @@ fn integrate_body<const N: usize>(
 
 fn render_frame(
     camera: Query<Camera>,
-    mesh: Query<Mesh, With<DynamicBody>>,
-    object: Query<DirectionCosine, With<DynamicBody>>,
+    mesh: Query<Mesh>,
+    dcm: Query<DirectionCosine>,
     light: Query<PointLight>,
     target: QueryMut<RenderTarget>,
 ) {
     let camera = camera.make_singular();
-    let mesh = mesh.make_singular();
     let light = light.make_singular();
-
     for mut target in target {
-        target.color.clear(u32::default());
-        target.depth.clear(f32::MAX);
         let (color, depth) = target.split_mut();
-        for DirectionCosine(object) in &object {
+        for (Mesh { vertices, indices }, DirectionCosine(dcm)) in mesh.into_iter().zip(&dcm) {
             SolidUniform {
-                model: *object,
+                model: *dcm,
                 view: camera.view,
                 proj: camera.projection,
                 light: light.pos,
             }
-            .render(
-                IndexedVertices::new(mesh.indices.as_slice(), mesh.vertices.as_slice()),
-                color,
-                depth,
-            );
+            .render(IndexedVertices::new(indices.as_slice(), vertices.as_slice()), color, depth);
         }
     }
 }
@@ -133,9 +128,12 @@ fn main() {
 
     let mut window = Window::new("flippy floppy", width, height, WindowOptions::default()).unwrap();
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        for RenderTarget { color, .. } in &master().query::<RenderTarget>() {
-            window.update_with_buffer(color.raw(), width, height).unwrap();
+        for mut target in master().query_mut::<RenderTarget>() {
+            window.update_with_buffer(target.color.raw(), width, height).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(15));
+            let (color, depth) = target.split_mut();
+            color.clear(u32::default());
+            depth.clear(f32::MAX);
         }
 
         master().run();
@@ -203,6 +201,12 @@ fn physics_setup() {
         vertices: Arc::new(vertices),
         indices: Arc::new(indices),
     };
+    let (ground_verts, ground_indices) = make_cuboid(
+        Vector3::new(10.0, 1.0, 10.0),
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector4::new(0.5, 0.5, 0.5, 1.0),
+    );
+    let ground_mesh = Mesh {vertices: ground_verts.into(), indices: ground_indices.into() };
     let mut state = SVector::<f32, 21>::zeros();
     state.rows_mut(0, 9).copy_from_slice(dcm.0.as_slice());
     state.rows_mut(9, 9).copy_from_slice(moi.0.as_slice());
@@ -217,12 +221,15 @@ fn physics_setup() {
 
     let mut ecs = master();
     let object = ecs.create_entity();
+    let ground = ecs.create_entity();
     ecs.add_component(object, moi);
     ecs.add_component(object, vel);
     ecs.add_component(object, dcm);
     ecs.add_component(object, mesh);
     ecs.add_component(object, integrator);
     ecs.add_component(object, DynamicBody);
+    ecs.add_component(ground, ground_mesh);
+    ecs.add_component(ground, DirectionCosine(Matrix3::identity()));
     ecs.add_system(integrate_body::<21>);
 }
 
@@ -307,6 +314,18 @@ impl<'d> Pipeline<'d> for SolidUniform {
     type Pixel = u32;
 
     #[inline(always)]
+    fn rasterizer_config(
+        &self,
+    ) -> <<Self::Primitives as PrimitiveKind<Self::VertexData>>::Rasterizer as Rasterizer>::Config {
+        CullMode::None
+    }
+
+    #[inline(always)]
+    fn depth_mode(&self) -> DepthMode {
+        DepthMode::LESS_WRITE
+    }
+
+    #[inline(always)]
     fn vertex(&self, vertex: &Self::Vertex) -> ([f32; 4], Self::VertexData) {
         let world_pos = self.model.to_homogeneous() * vertex.pos;
         let world_nor = self.model * vertex.nor;
@@ -316,11 +335,6 @@ impl<'d> Pipeline<'d> for SolidUniform {
         let clip_pos = self.proj * self.view * world_pos;
 
         (clip_pos.into(), Vertex { pos: clip_pos, col: gouraud, nor: world_nor })
-    }
-
-    #[inline(always)]
-    fn depth_mode(&self) -> DepthMode {
-        DepthMode::LESS_WRITE
     }
 
     #[inline(always)]
